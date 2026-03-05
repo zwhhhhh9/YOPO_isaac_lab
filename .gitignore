@@ -1,0 +1,10 @@
+# Large generated assets
+yopo_drone/assets/
+
+# Runtime logs/artifacts
+logs/
+*.log
+
+# Python cache
+__pycache__/
+*.pyc

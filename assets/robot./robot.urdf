@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot name="robot">
+  <link name="base_link">
+    <inertial>
+      <mass value="0.49469935"/>
+      <origin xyz="0.00325764 -0.00000127 0.00394186" rpy="0 0 0"/>
+      <inertia ixx="0.00048847" ixy="3.8e-7" ixz="0.00002804" iyy="0.0010395" iyz="1.1e-7" izz="0.00121702"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/base_link.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/base_link.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="Link_5">
+    <inertial>
+      <mass value="0.00132516"/>
+      <origin xyz="-2.1e-7 -3e-8 -0.00225319" rpy="0 0 0"/>
+      <inertia ixx="3e-8" ixy="8e-8" ixz="0" iyy="0.00000101" iyz="0" izz="0.00000104"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Link_5.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Link_5.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="Link_6">
+    <inertial>
+      <mass value="0.00132516"/>
+      <origin xyz="2e-8 2.1e-7 -0.00225319" rpy="0 0 0"/>
+      <inertia ixx="8.5e-7" ixy="-3.7e-7" ixz="0" iyy="1.9e-7" iyz="0" izz="0.00000104"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Link_6.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Link_6.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="Link_7">
+    <inertial>
+      <mass value="0.00132516"/>
+      <origin xyz="-2e-7 -7e-8 -0.00225319" rpy="0 0 0"/>
+      <inertia ixx="2e-8" ixy="-2e-8" ixz="0" iyy="0.00000102" iyz="0" izz="0.00000104"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Link_7.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Link_7.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <link name="Link_8">
+    <inertial>
+      <mass value="0.00132516"/>
+      <origin xyz="-1.2e-7 1.7e-7 -0.00225319" rpy="0 0 0"/>
+      <inertia ixx="8.9e-7" ixy="3.3e-7" ixz="0" iyy="1.5e-7" iyz="0" izz="0.00000104"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Link_8.stl"/>
+      </geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="meshes/Link_8.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <joint name="motor1" type="revolute">
+    <parent link="base_link"/>
+    <child link="Link_5"/>
+    <origin xyz="0.10005516 0.14828502 0.01908192" rpy="-0.00079633 -6.3e-7 -0.00079633"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.14159" upper="3.14159" effort="10" velocity="5000"/>
+  </joint>
+  <joint name="motor3" type="revolute">
+    <parent link="base_link"/>
+    <child link="Link_6"/>
+    <origin xyz="-0.1251103 -0.13844915 0.01931026" rpy="6.3e-7 -0.00079633 -1.57159265"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.14159" upper="3.14159" effort="10" velocity="5000"/>
+  </joint>
+  <joint name="motor2" type="revolute">
+    <parent link="base_link"/>
+    <child link="Link_7"/>
+    <origin xyz="0.09981889 -0.14841361 0.01931819" rpy="-0.00079633 -6.3e-7 -0.00079633"/>
+    <axis xyz="0 0 -1"/>
+    <limit lower="-3.14159" upper="3.14159" effort="10" velocity="5000"/>
+  </joint>
+  <joint name="motor4" type="revolute">
+    <parent link="base_link"/>
+    <child link="Link_8"/>
+    <origin xyz="-0.12488962 0.13867881 0.01908957" rpy="6.3e-7 -0.00079633 -1.57159265"/>
+    <axis xyz="0 0 -1"/>
+    <limit lower="-3.14159" upper="3.14159" effort="10" velocity="5000"/>
+  </joint>
+</robot>

@@ -1,0 +1,1 @@
+"""Task collections for YOPO."""

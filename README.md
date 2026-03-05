@@ -15,19 +15,6 @@ YOPO on Isaac Lab, with a project layout modeled after `Crazy_Fast`.
 - Isaac Sim image: `5.1.0`
 - Isaac Lab dependencies: full install (`isaaclab.sh --install`)
 
-## Quick start
-
-```bash
-cd YOPO_isaac_lab
-./scripts/init.sh
-./scripts/start.sh
-```
-
-Run a python file inside container (through Isaac Sim python):
-
-```bash
-./scripts/start.sh yopo_drone/tasks/yopo/train.py --help
-```
 
 ## 最简命令（初始化 YOPO Docker image + 启动 Isaac Lab GUI）
 

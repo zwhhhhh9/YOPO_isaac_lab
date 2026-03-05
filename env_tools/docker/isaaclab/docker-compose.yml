@@ -1,0 +1,131 @@
+x-default-isaac-lab-volumes: &default-isaac-lab-volumes
+  - type: volume
+    source: isaac-cache-kit
+    target: ${DOCKER_ISAACSIM_ROOT_PATH}/kit/cache
+  - type: volume
+    source: isaac-cache-ov
+    target: ${DOCKER_USER_HOME}/.cache/ov
+  - type: volume
+    source: isaac-cache-pip
+    target: ${DOCKER_USER_HOME}/.cache/pip
+  - type: volume
+    source: isaac-cache-gl
+    target: ${DOCKER_USER_HOME}/.cache/nvidia/GLCache
+  - type: volume
+    source: isaac-cache-compute
+    target: ${DOCKER_USER_HOME}/.nv/ComputeCache
+  - type: volume
+    source: isaac-logs
+    target: ${DOCKER_USER_HOME}/.nvidia-omniverse/logs
+  - type: volume
+    source: isaac-carb-logs
+    target: ${DOCKER_ISAACSIM_ROOT_PATH}/kit/logs/Kit/Isaac-Sim
+  - type: volume
+    source: isaac-data
+    target: ${DOCKER_USER_HOME}/.local/share/ov/data
+  - type: volume
+    source: isaac-docs
+    target: ${DOCKER_USER_HOME}/Documents
+  - type: bind
+    source: ${PROJECT_ROOT}/env_tools/docker/isaaclab/IsaacLab/source
+    target: ${DOCKER_ISAACLAB_PATH}/source
+  - type: bind
+    source: ${PROJECT_ROOT}/env_tools/docker/isaaclab/IsaacLab/docs
+    target: ${DOCKER_ISAACLAB_PATH}/docs
+  - type: bind
+    source: ${PROJECT_ROOT}/env_tools/docker/isaaclab/IsaacLab/tools
+    target: ${DOCKER_ISAACLAB_PATH}/tools
+  - type: bind
+    source: ${PROJECT_ROOT}/yopo_drone
+    target: ${DOCKER_ISAACLAB_PATH}/yopo_drone
+  - type: bind
+    source: ${PROJECT_ROOT}/logs
+    target: ${DOCKER_ISAACLAB_PATH}/logs
+  - type: volume
+    source: isaac-lab-data
+    target: ${DOCKER_ISAACLAB_PATH}/data_storage
+  - type: bind
+    source: /tmp/.X11-unix
+    target: /tmp/.X11-unix
+  - type: bind
+    source: /etc/localtime
+    target: /etc/localtime
+    read_only: true
+  - type: bind
+    source: /dev
+    target: /dev
+  - type: bind
+    source: /run/udev
+    target: /run/udev
+
+x-default-isaac-lab-environment: &default-isaac-lab-environment
+  - ACCEPT_EULA=${ACCEPT_EULA}
+  - ISAACSIM_PATH=${DOCKER_ISAACLAB_PATH}/_isaac_sim
+  - OMNI_KIT_ALLOW_ROOT=1
+  - DISPLAY=${DISPLAY}
+  - TERM
+  - QT_X11_NO_MITSHM=1
+
+x-default-isaac-lab-deploy: &default-isaac-lab-deploy
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: all
+          capabilities: [gpu]
+
+services:
+  yopo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - ISAACSIM_BASE_IMAGE_ARG=${ISAACSIM_BASE_IMAGE}
+        - ISAACSIM_VERSION_ARG=${ISAACSIM_VERSION}
+        - ISAACSIM_ROOT_PATH_ARG=${DOCKER_ISAACSIM_ROOT_PATH}
+        - ISAACLAB_PATH_ARG=${DOCKER_ISAACLAB_PATH}
+        - DOCKER_USER_HOME_ARG=${DOCKER_USER_HOME}
+    image: yopo-isaaclab-base
+    environment: *default-isaac-lab-environment
+    volumes: *default-isaac-lab-volumes
+    privileged: true
+    cap_add:
+      - SYS_RAWIO
+      - SYS_ADMIN
+    network_mode: host
+    deploy: *default-isaac-lab-deploy
+    entrypoint: ${ENTRYPOINT:-bash}
+    stdin_open: true
+    tty: true
+
+volumes:
+  isaac-cache-kit:
+    external: true
+    name: ${ISAAC_CACHE_KIT:-isaac_shared_cache_kit}
+  isaac-cache-ov:
+    external: true
+    name: ${ISAAC_CACHE_OV:-isaac_shared_cache_ov}
+  isaac-cache-pip:
+    external: true
+    name: ${ISAAC_CACHE_PIP:-isaac_shared_cache_pip}
+  isaac-cache-gl:
+    external: true
+    name: ${ISAAC_CACHE_GL:-isaac_shared_cache_gl}
+  isaac-cache-compute:
+    external: true
+    name: ${ISAAC_CACHE_COMPUTE:-isaac_shared_cache_compute}
+  isaac-logs:
+    external: true
+    name: ${ISAAC_LOGS:-isaac_shared_logs}
+  isaac-carb-logs:
+    external: true
+    name: ${ISAAC_CARB_LOGS:-isaac_shared_carb_logs}
+  isaac-data:
+    external: true
+    name: ${ISAAC_DATA:-isaac_shared_data}
+  isaac-docs:
+    external: true
+    name: ${ISAAC_DOCS:-isaac_shared_docs}
+  isaac-lab-data:
+    external: true
+    name: ${ISAAC_LAB_DATA:-isaac_shared_lab_data}

@@ -1,0 +1,8 @@
+*.npz
+*.pth
+*.pt
+*.png
+*.jpg
+*.jpeg
+*.gif
+logs
