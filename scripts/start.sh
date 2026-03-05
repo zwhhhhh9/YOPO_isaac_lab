@@ -12,6 +12,11 @@ else
     echo "Using local BASE_DIR: $BASE_DIR"
 fi
 
+# Isaac Lab's launcher script calls `tabs 4`; TERM=dumb makes it fail immediately.
+if [ -z "${TERM:-}" ] || [ "${TERM:-}" = "dumb" ]; then
+    export TERM="xterm-256color"
+fi
+
 TIMESTAMP=$(date +%Y%m%d%H%M%S)
 PROJECT_NAME="yopo_isaaclab_${TIMESTAMP}"
 DOCKER_COMPOSE_FILE="$(dirname "$SCRIPT_DIR")/env_tools/docker/isaaclab/docker-compose.yml"
@@ -20,6 +25,30 @@ DOCKER_COMPOSE_FILE="$(dirname "$SCRIPT_DIR")/env_tools/docker/isaaclab/docker-c
 # Dockerfile / docker-compose should consume this variable.
 export ISAACLAB_INSTALL_MODE="${ISAACLAB_INSTALL_MODE:-none}"
 echo "ISAACLAB_INSTALL_MODE=${ISAACLAB_INSTALL_MODE}"
+
+COMPOSE_STARTED=0
+
+require_command() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo "Error: required command not found: $1"
+        trap - EXIT INT TERM
+        exit 1
+    fi
+}
+
+ensure_docker_ready() {
+    require_command docker
+    if ! docker compose version >/dev/null 2>&1; then
+        echo "Error: docker compose plugin is not available."
+        trap - EXIT INT TERM
+        exit 1
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        echo "Error: cannot access Docker daemon. Check docker service and user permissions."
+        trap - EXIT INT TERM
+        exit 1
+    fi
+}
 
 ensure_initialized() {
     local isaaclab_dir="$BASE_DIR/env_tools/docker/isaaclab/IsaacLab"
@@ -67,9 +96,13 @@ create_shared_volumes() {
 }
 
 cleanup() {
-    echo "Cleaning up container: $PROJECT_NAME"
-    docker compose -f "$DOCKER_COMPOSE_FILE" -p "$PROJECT_NAME" down
-    echo "Container cleaned up successfully."
+    trap - EXIT INT TERM
+    if [ "$COMPOSE_STARTED" -eq 1 ]; then
+        echo "Cleaning up container: $PROJECT_NAME"
+        docker compose -f "$DOCKER_COMPOSE_FILE" -p "$PROJECT_NAME" down || true
+        echo "Container cleaned up successfully."
+        COMPOSE_STARTED=0
+    fi
 }
 
 trap cleanup EXIT INT TERM
@@ -81,18 +114,21 @@ show_help() {
     echo ""
     echo "Options:"
     echo "  -h, --help         Display this help message and exit"
+    echo "  --gui              Start Isaac Lab GUI directly"
     echo "  --stop-all         Stop all running YOPO Isaac Lab containers"
     echo ""
     echo "Env:"
     echo "  ISAACLAB_INSTALL_MODE=none   (default) Skip extra installs (RL frameworks)"
     echo ""
     echo "Example:"
+    echo "  ./scripts/start.sh --gui"
     echo "  ISAACLAB_INSTALL_MODE=none ./scripts/start.sh yopo_drone/tasks/yopo/train.py --help"
     trap - EXIT INT TERM
     exit 0
 }
 
 stop_all_containers() {
+    ensure_docker_ready
     echo "Stopping all yopo_isaaclab containers..."
     PROJECTS=$(docker compose ls --format "{{.Project}}" | grep "^yopo_isaaclab_" || true)
 
@@ -110,25 +146,43 @@ stop_all_containers() {
     exit 0
 }
 
+LAUNCH_GUI=0
+
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
     show_help
 elif [ "${1:-}" = "--stop-all" ]; then
     stop_all_containers
+elif [ "${1:-}" = "--gui" ]; then
+    LAUNCH_GUI=1
+    shift
 fi
 
+ensure_docker_ready
 ensure_initialized
 create_shared_volumes
 
-if [ "$#" -ge 1 ]; then
-    ENTRYPOINT_CMD="/bin/bash -c \"source ~/.bashrc && /workspace/isaaclab/_isaac_sim/python.sh /workspace/isaaclab/yopo_drone/run.py $*\""
+if [ "$LAUNCH_GUI" -eq 1 ]; then
+    if [ -z "${DISPLAY:-}" ]; then
+        echo "Error: DISPLAY is not set. Cannot launch Isaac Lab GUI."
+        trap - EXIT INT TERM
+        exit 1
+    fi
+    ENTRYPOINT_CMD="/bin/bash -c \"/workspace/isaaclab/isaaclab.sh -s\""
+    export ENTRYPOINT="$ENTRYPOINT_CMD"
+    echo "Setting ENTRYPOINT to Isaac Lab GUI: $ENTRYPOINT"
+elif [ "$#" -ge 1 ]; then
+    ENTRYPOINT_CMD="/bin/bash -c \"/workspace/isaaclab/_isaac_sim/python.sh /workspace/isaaclab/yopo_drone/run.py $*\""
     export ENTRYPOINT="$ENTRYPOINT_CMD"
     echo "Setting ENTRYPOINT to: $ENTRYPOINT"
 else
     echo "No ENTRYPOINT specified. Container will use default entrypoint."
 fi
 
-xhost + || true
+if [ -n "${DISPLAY:-}" ] && command -v xhost >/dev/null 2>&1; then
+    xhost +local:root >/dev/null 2>&1 || true
+fi
 mkdir -p "$BASE_DIR/logs"
 
 echo "Starting new container with project name: $PROJECT_NAME"
+COMPOSE_STARTED=1
 docker compose -f "$DOCKER_COMPOSE_FILE" -p "$PROJECT_NAME" up

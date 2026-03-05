@@ -16,21 +16,16 @@ YOPO on Isaac Lab, with a project layout modeled after `Crazy_Fast`.
 - Isaac Lab dependencies: full install (`isaaclab.sh --install`)
 
 
-## 最简命令（初始化 YOPO Docker image + 启动 Isaac Lab GUI）
+## 最简命令（初始化 + 启动 Isaac Lab GUI）
+
+首次初始化（只需一次）：
 
 ```bash
-cd YOPO_isaac_lab
-./scripts/init.sh
+cd YOPO_isaac_lab && ./scripts/init.sh
 ```
 
-初始化/构建 YOPO Docker image（首次执行，后续按需重建）：
+一行启动容器并打开 Isaac Lab GUI（首次会自动构建镜像）：
 
 ```bash
-BASE_DIR=$PWD docker compose -f env_tools/docker/isaaclab/docker-compose.yml build yopo
-```
-
-启动 Isaac Lab GUI（以 quadcopter demo 为例）：
-
-```bash
-./scripts/start.sh env_tools/docker/isaaclab/IsaacLab/scripts/demos/quadcopter.py
+cd YOPO_isaac_lab && ./scripts/start.sh --gui
 ```
