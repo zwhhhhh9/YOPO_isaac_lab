@@ -31,24 +31,14 @@ cd YOPO_isaac_lab
 
 ```bash
 cd YOPO_isaac_lab
-./scripts/start.sh --editor --random-obstacles 2
+./scripts/start.sh --editor
 ```
 
-3) 无界面执行并导出 USD（用于配置测试留档）：
+3) 无界面执行一次程序测试（不生成文件）：
 
 ```bash
 cd YOPO_isaac_lab
 ./scripts/start.sh --editor \
   --headless \
-  --close-after-build \
-  --output-usd /workspace/isaaclab/logs/drone_env_test.usd \
-  --random-obstacles 2
-```
-
-4) 在宿主机检查导出文件：
-
-```bash
-cd YOPO_isaac_lab
-ls -lh logs/drone_env_test.usd
-file logs/drone_env_test.usd
+  --close-after-build
 ```

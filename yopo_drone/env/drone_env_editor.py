@@ -5,24 +5,17 @@ Example:
     # Preview directly in Isaac Lab GUI (default keeps window open):
     python yopo_drone/run.py yopo_drone/env/drone_env_editor.py \
         --ground-size 100000 100000 \
-        --sun-intensity 120000 \
-        --obstacle wall_1 8 0 2 1 12 4 \
-        --grid-rows 3 --grid-cols 4 --grid-spacing 6 6 \
-        --random-obstacles 15
+        --sun-intensity 120000
 
-    # Optional: export edited result to a USD file:
+    # Headless smoke test (no GUI):
     python yopo_drone/run.py yopo_drone/env/drone_env_editor.py \
-        --output-usd /tmp/drone_env.usd \
-        --random-obstacles 10 --close-after-build
+        --headless --close-after-build
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
-import random
-import re
-from pathlib import Path
 from typing import Iterable
 
 with contextlib.suppress(ModuleNotFoundError):
@@ -38,24 +31,23 @@ except ImportError as exc:
     ) from exc
 
 Gf = None
-Sdf = None
 Usd = None
 UsdGeom = None
 UsdLux = None
 
 
 def _ensure_pxr_imported() -> None:
-    global Gf, Sdf, Usd, UsdGeom, UsdLux
-    if all(module is not None for module in (Gf, Sdf, Usd, UsdGeom, UsdLux)):
+    global Gf, Usd, UsdGeom, UsdLux
+    if all(module is not None for module in (Gf, Usd, UsdGeom, UsdLux)):
         return
     try:
-        from pxr import Gf as _Gf, Sdf as _Sdf, Usd as _Usd, UsdGeom as _UsdGeom, UsdLux as _UsdLux
+        from pxr import Gf as _Gf, Usd as _Usd, UsdGeom as _UsdGeom, UsdLux as _UsdLux
     except ImportError as exc:
         raise SystemExit(
             "This script requires Isaac Sim / Isaac Lab Python runtime (pxr module not found). "
             "Rebuild the image with usd-core installed."
         ) from exc
-    Gf, Sdf, Usd, UsdGeom, UsdLux = _Gf, _Sdf, _Usd, _UsdGeom, _UsdLux
+    Gf, Usd, UsdGeom, UsdLux = _Gf, _Usd, _UsdGeom, _UsdLux
 
 
 def _get_or_create_op(xformable: UsdGeom.Xformable, op_type: UsdGeom.XformOp.Type) -> UsdGeom.XformOp:
@@ -171,153 +163,10 @@ def _add_lights(
         )
 
 
-def _add_box_obstacle(
-    stage: Usd.Stage,
-    obstacles_path: str,
-    *,
-    name: str,
-    center: tuple[float, float, float],
-    size: tuple[float, float, float],
-    color: tuple[float, float, float],
-) -> None:
-    path = Sdf.Path(obstacles_path).AppendChild(_sanitize_prim_name(name)).pathString
-    _clear_path(stage, path)
-    cube = UsdGeom.Cube.Define(stage, path)
-    cube.CreateSizeAttr(1.0)
-    _set_color(cube, color)
-    _set_transform(UsdGeom.Xformable(cube.GetPrim()), translate=center, scale=size)
-
-
-def _parse_obstacle_tokens(tokens: list[str]) -> tuple[str, tuple[float, float, float], tuple[float, float, float]]:
-    if len(tokens) != 7:
-        raise ValueError(
-            "Each --obstacle needs 7 values: NAME X Y Z SX SY SZ"
-        )
-    name = tokens[0]
-    values = tuple(float(v) for v in tokens[1:])
-    return name, (values[0], values[1], values[2]), (values[3], values[4], values[5])
-
-
-def _sanitize_prim_name(name: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9_]", "_", name.strip())
-    if not cleaned:
-        return "Obstacle"
-    if cleaned[0].isdigit():
-        cleaned = f"_{cleaned}"
-    return cleaned
-
-
-def _generate_grid_obstacles(
-    stage: Usd.Stage,
-    obstacles_path: str,
-    args: argparse.Namespace,
-) -> int:
-    if args.grid_rows <= 0 or args.grid_cols <= 0:
-        return 0
-
-    count = 0
-    size_x, size_y, size_z = args.grid_size
-    spacing_x, spacing_y = args.grid_spacing
-    origin_x, origin_y = args.grid_origin
-    z = args.grid_base_z + size_z * 0.5
-    start_x = origin_x - 0.5 * (args.grid_cols - 1) * spacing_x
-    start_y = origin_y - 0.5 * (args.grid_rows - 1) * spacing_y
-
-    for row in range(args.grid_rows):
-        for col in range(args.grid_cols):
-            jitter_x = random.uniform(-args.grid_jitter, args.grid_jitter)
-            jitter_y = random.uniform(-args.grid_jitter, args.grid_jitter)
-            x = start_x + col * spacing_x + jitter_x
-            y = start_y + row * spacing_y + jitter_y
-            _add_box_obstacle(
-                stage,
-                obstacles_path,
-                name=f"grid_{row}_{col}",
-                center=(x, y, z),
-                size=(size_x, size_y, size_z),
-                color=tuple(args.obstacle_color),
-            )
-            count += 1
-    return count
-
-
-def _generate_random_obstacles(
-    stage: Usd.Stage,
-    obstacles_path: str,
-    args: argparse.Namespace,
-) -> int:
-    if args.random_obstacles <= 0:
-        return 0
-
-    if args.random_area is None:
-        area_x = args.ground_size[0] * 0.45
-        area_y = args.ground_size[1] * 0.45
-    else:
-        area_x, area_y = args.random_area
-
-    min_sx, min_sy, min_sz = args.random_size_min
-    max_sx, max_sy, max_sz = args.random_size_max
-    if min_sx > max_sx or min_sy > max_sy or min_sz > max_sz:
-        raise ValueError("--random-size-min must be <= --random-size-max for every axis")
-
-    count = 0
-    for i in range(args.random_obstacles):
-        sx = random.uniform(min_sx, max_sx)
-        sy = random.uniform(min_sy, max_sy)
-        sz = random.uniform(min_sz, max_sz)
-        x = random.uniform(-area_x, area_x)
-        y = random.uniform(-area_y, area_y)
-        z = args.random_base_z + sz * 0.5
-
-        _add_box_obstacle(
-            stage,
-            obstacles_path,
-            name=f"random_{i}",
-            center=(x, y, z),
-            size=(sx, sy, sz),
-            color=tuple(args.obstacle_color),
-        )
-        count += 1
-    return count
-
-
-def _add_obstacles(stage: Usd.Stage, world_path: str, args: argparse.Namespace) -> int:
-    obstacles_path = f"{world_path}/Obstacles"
-    if args.clear_obstacles:
-        _clear_path(stage, obstacles_path)
-    UsdGeom.Xform.Define(stage, obstacles_path)
-
-    added = 0
-    for idx, tokens in enumerate(args.obstacle):
-        name, center, size = _parse_obstacle_tokens(tokens)
-        if not name:
-            name = f"manual_{idx}"
-        _add_box_obstacle(
-            stage,
-            obstacles_path,
-            name=name,
-            center=center,
-            size=size,
-            color=tuple(args.obstacle_color),
-        )
-        added += 1
-
-    added += _generate_grid_obstacles(stage, obstacles_path, args)
-    added += _generate_random_obstacles(stage, obstacles_path, args)
-    return added
-
-
 def _build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Edit an Isaac Lab drone environment scene.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    parser.add_argument("--input-usd", type=Path, default=None, help="Optional source USD scene.")
-    parser.add_argument(
-        "--output-usd",
-        type=Path,
-        default=None,
-        help="Optional output USD scene. If omitted, only live stage in Isaac Lab is edited.",
     )
     parser.add_argument("--world-path", type=str, default="/World", help="Root prim path for the world.")
     parser.add_argument(
@@ -355,56 +204,14 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--distant-translate", type=float, nargs=3, default=(0.0, 0.0, 25.0))
     parser.add_argument("--distant-rotate-xyz", type=float, nargs=3, default=(-50.0, 35.0, 0.0))
 
-    parser.add_argument(
-        "--obstacle",
-        nargs=7,
-        action="append",
-        default=[],
-        metavar=("NAME", "X", "Y", "Z", "SX", "SY", "SZ"),
-        help="Manual box obstacle. Repeat this argument to add more.",
-    )
-    parser.add_argument("--obstacle-color", type=float, nargs=3, default=(0.85, 0.25, 0.2))
-    parser.add_argument("--clear-obstacles", action="store_true", help="Clear /World/Obstacles before adding.")
-
-    parser.add_argument("--grid-rows", type=int, default=0)
-    parser.add_argument("--grid-cols", type=int, default=0)
-    parser.add_argument("--grid-spacing", type=float, nargs=2, default=(6.0, 6.0))
-    parser.add_argument("--grid-size", type=float, nargs=3, default=(1.5, 1.5, 3.0))
-    parser.add_argument("--grid-origin", type=float, nargs=2, default=(0.0, 0.0))
-    parser.add_argument("--grid-base-z", type=float, default=0.0)
-    parser.add_argument("--grid-jitter", type=float, default=0.0, help="Max random offset in XY for each grid obstacle.")
-
-    parser.add_argument("--random-obstacles", type=int, default=0)
-    parser.add_argument(
-        "--random-area",
-        type=float,
-        nargs=2,
-        default=None,
-        metavar=("HALF_X", "HALF_Y"),
-        help="Spawn area half-extent in XY. Defaults to 45%% of ground size.",
-    )
-    parser.add_argument("--random-size-min", type=float, nargs=3, default=(0.8, 0.8, 1.2))
-    parser.add_argument("--random-size-max", type=float, nargs=3, default=(3.0, 3.0, 4.5))
-    parser.add_argument("--random-base-z", type=float, default=0.0)
-    parser.add_argument("--seed", type=int, default=0)
     return parser
 
 
-def _load_or_create_stage(input_usd: Path | None) -> Usd.Stage:
+def _create_new_stage() -> Usd.Stage:
     import omni.usd
 
-    if input_usd is not None:
-        if not input_usd.exists():
-            raise RuntimeError(f"Cannot open input USD (file does not exist): {input_usd}")
-        usd_context = omni.usd.get_context()
-        usd_context.disable_save_to_recent_files()
-        opened = usd_context.open_stage(str(input_usd))
-        usd_context.enable_save_to_recent_files()
-        if not opened:
-            raise RuntimeError(f"Cannot open input USD: {input_usd}")
-    else:
-        if not omni.usd.get_context().new_stage():
-            raise RuntimeError("Cannot create a new USD stage.")
+    if not omni.usd.get_context().new_stage():
+        raise RuntimeError("Cannot create a new USD stage.")
 
     stage = omni.usd.get_context().get_stage()
     if stage is None:
@@ -431,13 +238,7 @@ def main() -> int:
 
     try:
         _ensure_pxr_imported()
-        random.seed(args.seed)
-        input_path = args.input_usd.expanduser().resolve() if args.input_usd else None
-        output_path = args.output_usd.expanduser().resolve() if args.output_usd else None
-        if output_path is not None:
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        stage = _load_or_create_stage(input_path)
+        stage = _create_new_stage()
         _configure_stage(stage)
         _define_world(stage, args.world_path)
 
@@ -451,21 +252,11 @@ def main() -> int:
             color=tuple(args.ground_color),
         )
         _add_lights(stage, args.world_path, args)
-        obstacle_count = _add_obstacles(stage, args.world_path, args)
-
-        if output_path is not None:
-            if input_path is not None and output_path == input_path:
-                stage.GetRootLayer().Save()
-            else:
-                stage.GetRootLayer().Export(str(output_path))
-            print(f"Saved edited scene to: {output_path}")
-        else:
-            print("No USD file written (--output-usd not provided). Scene is updated in current Isaac Lab stage.")
+        print("Scene updated in current Isaac Lab stage.")
 
         print(
             "Summary:"
             f" ground=({args.ground_size[0]} x {args.ground_size[1]}),"
-            f" obstacles_added={obstacle_count},"
             f" dome_light={'off' if args.disable_dome_light else 'on'},"
             f" sun_light={'off' if args.disable_sun_light else 'on'},"
             f" distant_light={'off' if args.disable_distant_light else 'on'}"
