@@ -271,6 +271,71 @@ def _warm_up_tiled_camera(tiled_camera: Any, sim: Any, *, sim_dt: float, warmup_
     print(f"Tiled camera data ready: rgb_shape={rgb_shape}, depth_shape={depth_shape}", flush=True)
 
 
+def _attach_tiled_camera_inset(args: argparse.Namespace) -> Any:
+    """Create a small secondary viewport that follows the tiled camera."""
+    if args.headless or args.disable_tiled_camera or args.disable_tiled_camera_inset:
+        return None
+    if not _is_gui_enabled():
+        return None
+    try:
+        from pxr import Sdf
+        import omni.ui as ui
+        from omni.kit.viewport.window import ViewportWindow
+
+        inset_window = ViewportWindow(
+            name="Tiled Camera",
+            width=int(args.tiled_cam_inset_width),
+            height=int(args.tiled_cam_inset_height),
+        )
+        # ViewportWindow visibility is method-based in Kit API.
+        with contextlib.suppress(Exception):
+            inset_window.visible(True)
+        with contextlib.suppress(Exception):
+            inset_window.visible = True
+        inset_window.viewport_api.camera_path = Sdf.Path(str(args.tiled_cam_prim_path))
+
+        def _to_int(value: Any, default: int) -> int:
+            with contextlib.suppress(Exception):
+                return int(value)
+            with contextlib.suppress(Exception):
+                return int(float(value))
+            return default
+
+        def _place_inset(window_obj: Any) -> None:
+            """Place inset above Render Settings window; fallback to default coords."""
+            render_settings_window = ui.Workspace.get_window("Render Settings")
+            if render_settings_window is not None:
+                inset_h = int(args.tiled_cam_inset_height)
+                margin = 12
+
+                rs_x = _to_int(getattr(render_settings_window, "position_x", 0), 0)
+                rs_y = _to_int(getattr(render_settings_window, "position_y", 0), 0)
+                target_x = rs_x
+                target_y = max(0, rs_y - inset_h - margin)
+
+                window_obj.position_x = target_x
+                window_obj.position_y = target_y
+                return
+
+            window_obj.position_x = int(args.tiled_cam_inset_pos_x)
+            window_obj.position_y = int(args.tiled_cam_inset_pos_y)
+
+        # Initial placement and continuous lock (prevents manual dragging).
+        _place_inset(inset_window)
+
+        print(
+            "Tiled camera inset attached:"
+            " window='Tiled Camera',"
+            f" size=({args.tiled_cam_inset_width}x{args.tiled_cam_inset_height}),"
+            f" camera={args.tiled_cam_prim_path},"
+            " anchor='above Render Settings'"
+        , flush=True)
+        return inset_window
+    except Exception as exc:
+        print(f"Tiled camera inset warning: {exc!r}", flush=True)
+        return None
+
+
 def _build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Edit an Isaac Lab drone environment scene.",
@@ -347,6 +412,16 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--tiled-cam-clip-near", type=float, default=0.05)
     parser.add_argument("--tiled-cam-clip-far", type=float, default=200.0)
     parser.add_argument("--tiled-cam-warmup-steps", type=int, default=6)
+    parser.add_argument(
+        "--disable-tiled-camera-inset",
+        action="store_true",
+        help="Disable the small GUI inset viewport that displays the tiled camera feed.",
+    )
+    parser.add_argument("--tiled-cam-inset-window-name", type=str, default="Tiled Camera")
+    parser.add_argument("--tiled-cam-inset-width", type=int, default=360)
+    parser.add_argument("--tiled-cam-inset-height", type=int, default=240)
+    parser.add_argument("--tiled-cam-inset-pos-x", type=int, default=60)
+    parser.add_argument("--tiled-cam-inset-pos-y", type=int, default=120)
 
     return parser
 
@@ -440,6 +515,7 @@ def main() -> int:
 
     simulation_app, _app_owner = _create_simulation_app(headless=bool(args.headless))
     sim = None
+    inset_window = None
 
     try:
         _ensure_pxr_imported()
@@ -476,6 +552,7 @@ def main() -> int:
                 sim_dt=float(args.sim_dt),
                 warmup_steps=int(args.tiled_cam_warmup_steps),
             )
+            inset_window = _attach_tiled_camera_inset(args)
 
         _set_overview_camera(sim)
         _enable_viewport_grid()
@@ -511,6 +588,10 @@ def main() -> int:
                 sim.stop()
                 sim.clear_all_callbacks()
                 sim.clear_instance()
+
+        if inset_window is not None:
+            with contextlib.suppress(Exception):
+                inset_window.destroy()
 
         if args.headless or args.close_after_build:
             simulation_app.close(wait_for_replicator=False, skip_cleanup=True)

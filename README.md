@@ -1,40 +1,81 @@
-# YOPO_isaac_lab 使用命令
+# YOPO Isaac Lab
 
-## 1. 初始化并配置 Docker 环境
+Docker-based workspace for running Isaac Lab and the YOPO environment editor.
+
+## Repository Layout
+
+```text
+scripts/                 # Entry scripts (init, start)
+env_tools/docker/isaaclab/  # Dockerfile, compose, Isaac Lab source checkout
+yopo_drone/              # YOPO runtime and env editor program
+assets/                  # Robot and scene assets
+logs/                    # Runtime logs mounted from container
+```
+
+## Prerequisites
+
+- Linux with NVIDIA GPU and working NVIDIA drivers
+- Docker + Docker Compose plugin
+- X11 desktop session for GUI runs (`DISPLAY` must be available)
+
+## Quick Start
+
+### 1) Initialize the workspace
+
+This prepares the local Isaac Lab source tree under `env_tools/docker/isaaclab/IsaacLab`.
 
 ```bash
 cd YOPO_isaac_lab
 ./scripts/init.sh
 ```
 
-说明：首次执行会准备 IsaacLab 源码；后续可重复执行用于校验或更新初始化状态。
+### 2) Test Isaac Lab GUI startup
 
-## 2. 测试 Isaac Lab GUI
+This launches Isaac Lab GUI directly in the container.
 
 ```bash
 ./scripts/start.sh --gui
 ```
 
-说明：该命令会拉起容器并进入 Isaac Lab GUI。若报 `DISPLAY is not set`，请先配置本机图形显示环境再执行。
+### 3) Test the env_editor Python program
 
-## 3. 测试环境配置 Python 程序（drone_env_editor.py）
+The env editor entry script is:
+`yopo_drone/env/drone_env_editor.py`
 
-1) 查看程序参数（快速验证 Python 运行环境可用）：
-
-```bash
-./scripts/start.sh --env_editor --help
-```
-
-2) GUI 模式下运行一次环境编辑测试：
+Run in GUI mode:
 
 ```bash
 ./scripts/start.sh --env_editor
 ```
 
-3) 无界面执行一次程序测试（不生成文件）：
+Run headless smoke test (build scene and exit):
 
 ```bash
-./scripts/start.sh --env_editor \
-  --headless \
-  --close-after-build
+./scripts/start.sh --env_editor --headless --close-after-build
 ```
+
+Show env editor arguments/help:
+
+```bash
+./scripts/start.sh --env_editor --help
+```
+
+## Useful Commands
+
+Stop all running YOPO Isaac Lab containers:
+
+```bash
+./scripts/start.sh --stop-all
+```
+
+Show launcher help:
+
+```bash
+./scripts/start.sh --help
+```
+
+## Notes
+
+- `scripts/start.sh` auto-creates required Docker volumes.
+- On exit, the launched compose project is automatically cleaned up.
+- If GUI does not appear, verify X11 access and `DISPLAY` on host.
