@@ -1,31 +1,54 @@
-# YOPO_isaac_lab
+# YOPO_isaac_lab 使用命令
 
-YOPO on Isaac Lab, with a project layout modeled after `Crazy_Fast`.
-
-## What is included
-
-- `yopo_drone/`: YOPO task package entrypoint and future task code.
-- `env_tools/docker/isaaclab/`: Isaac Lab container build/run stack.
-- `env_tools/autodl/`: Optional AUTODL image and launcher.
-- `scripts/`: Local bootstrap and container start scripts.
-
-## Version policy
-
-- Isaac Lab: `v2.3.2` (latest stable release at setup time)
-- Isaac Sim image: `5.1.0`
-- Isaac Lab dependencies: full install (`isaaclab.sh --install`)
-
-
-## 最简命令（初始化 + 启动 Isaac Lab GUI）
-
-首次初始化（只需一次）：
+## 1. 初始化并配置 Docker 环境
 
 ```bash
-cd YOPO_isaac_lab && ./scripts/init.sh
+cd YOPO_isaac_lab
+./scripts/init.sh
 ```
 
-一行启动容器并打开 Isaac Lab GUI（首次会自动构建镜像）：
+说明：首次执行会准备 IsaacLab 源码；后续可重复执行用于校验或更新初始化状态。
+
+## 2. 测试 Isaac Lab GUI
 
 ```bash
-cd YOPO_isaac_lab && ./scripts/start.sh --gui
+cd YOPO_isaac_lab
+./scripts/start.sh --gui
+```
+
+说明：该命令会拉起容器并进入 Isaac Lab GUI。若报 `DISPLAY is not set`，请先配置本机图形显示环境再执行。
+
+## 3. 测试环境配置 Python 程序（drone_env_editor.py）
+
+1) 查看程序参数（快速验证 Python 运行环境可用）：
+
+```bash
+cd YOPO_isaac_lab
+./scripts/start.sh --editor --help
+```
+
+2) GUI 模式下运行一次环境编辑测试：
+
+```bash
+cd YOPO_isaac_lab
+./scripts/start.sh --editor --random-obstacles 2
+```
+
+3) 无界面执行并导出 USD（用于配置测试留档）：
+
+```bash
+cd YOPO_isaac_lab
+./scripts/start.sh --editor \
+  --headless \
+  --close-after-build \
+  --output-usd /workspace/isaaclab/logs/drone_env_test.usd \
+  --random-obstacles 2
+```
+
+4) 在宿主机检查导出文件：
+
+```bash
+cd YOPO_isaac_lab
+ls -lh logs/drone_env_test.usd
+file logs/drone_env_test.usd
 ```

@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-
 # Base image
 ARG ISAACSIM_BASE_IMAGE_ARG
 ARG ISAACSIM_VERSION_ARG
@@ -79,7 +77,14 @@ RUN touch /bin/nvidia-smi && \
 RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
     ${ISAACLAB_PATH}/isaaclab.sh --install none
 
-# Your extra utilities (safe)
+# Required by yopo_drone/env/drone_env_editor.py.
+# Install pxr as a standalone Docker layer via usd-core.
+RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
+    ${ISAACLAB_PATH}/isaaclab.sh -p -m pip install --no-cache-dir \
+    "usd-core>=25.2.post1,<26" && \
+    ${ISAACLAB_PATH}/_isaac_sim/python.sh -c "import pxr; print('pxr import check: OK')"
+
+# Extra utilities (safe)
 RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
     ${ISAACLAB_PATH}/isaaclab.sh -p -m pip install \
     pynput \

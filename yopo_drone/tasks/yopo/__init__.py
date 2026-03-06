@@ -1,1 +1,0 @@
-"""YOPO task definitions."""
