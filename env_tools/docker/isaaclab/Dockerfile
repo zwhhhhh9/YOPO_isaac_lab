@@ -86,7 +86,21 @@ RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
 
 # Extra utilities (safe)
 RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
-    ${ISAACLAB_PATH}/isaaclab.sh -p -m pip install \
+    ${ISAACLAB_PATH}/isaaclab.sh -p -m pip install --no-build-isolation --no-cache-dir \
+    flatdict==4.0.1 \
+    && ${ISAACLAB_PATH}/isaaclab.sh -p -m pip install --no-cache-dir \
+    prettytable==3.3.0 \
+    "onnx>=1.18.0" \
+    hidapi==0.14.0.post2 \
+    gymnasium==1.2.1 \
+    "pyglet<2" \
+    transformers==4.57.6 \
+    einops \
+    warp-lang \
+    pytest \
+    pytest-mock \
+    junitparser \
+    flaky \
     pynput \
     debugpy \
     rtree

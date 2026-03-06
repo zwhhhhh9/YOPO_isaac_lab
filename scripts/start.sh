@@ -176,11 +176,11 @@ if [ "$LAUNCH_GUI" -eq 1 ]; then
     export ENTRYPOINT="$ENTRYPOINT_CMD"
     echo "Setting ENTRYPOINT to Isaac Lab GUI: $ENTRYPOINT"
 elif [ "$LAUNCH_EDITOR" -eq 1 ]; then
-    ENTRYPOINT_CMD="/bin/bash -c \"/workspace/isaaclab/_isaac_sim/python.sh -c 'import flatdict' >/dev/null 2>&1 || /workspace/isaaclab/_isaac_sim/python.sh -m pip install --no-cache-dir flatdict; /workspace/isaaclab/isaaclab.sh -p /workspace/isaaclab/yopo_drone/run.py yopo_drone/env/drone_env_editor.py $*\""
+    ENTRYPOINT_CMD="/bin/bash -c \"/workspace/isaaclab/_isaac_sim/python.sh -c 'import flatdict' >/dev/null 2>&1 || { echo 'Error: python package flatdict is missing in image yopo-isaaclab-base. Rebuild image: docker compose -f /workspace/isaaclab/env_tools/docker/isaaclab/docker-compose.yml build yopo'; exit 32; }; /workspace/isaaclab/isaaclab.sh -p /workspace/isaaclab/yopo_drone/run.py yopo_drone/env/drone_env_editor.py $*\""
     export ENTRYPOINT="$ENTRYPOINT_CMD"
     echo "Setting ENTRYPOINT to drone_env_editor.py: $ENTRYPOINT"
 elif [ "$#" -ge 1 ]; then
-    ENTRYPOINT_CMD="/bin/bash -c \"/workspace/isaaclab/_isaac_sim/python.sh -c 'import flatdict' >/dev/null 2>&1 || /workspace/isaaclab/_isaac_sim/python.sh -m pip install --no-cache-dir flatdict; /workspace/isaaclab/isaaclab.sh -p /workspace/isaaclab/yopo_drone/run.py $*\""
+    ENTRYPOINT_CMD="/bin/bash -c \"/workspace/isaaclab/_isaac_sim/python.sh -c 'import flatdict' >/dev/null 2>&1 || { echo 'Error: python package flatdict is missing in image yopo-isaaclab-base. Rebuild image: docker compose -f /workspace/isaaclab/env_tools/docker/isaaclab/docker-compose.yml build yopo'; exit 32; }; /workspace/isaaclab/isaaclab.sh -p /workspace/isaaclab/yopo_drone/run.py $*\""
     export ENTRYPOINT="$ENTRYPOINT_CMD"
     echo "Setting ENTRYPOINT to: $ENTRYPOINT"
 else
@@ -189,6 +189,7 @@ fi
 
 if [ -n "${DISPLAY:-}" ] && command -v xhost >/dev/null 2>&1; then
     xhost +local:root >/dev/null 2>&1 || true
+    xhost +SI:localuser:root >/dev/null 2>&1 || true
 fi
 mkdir -p "$BASE_DIR/logs"
 
