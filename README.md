@@ -12,7 +12,6 @@ cd YOPO_isaac_lab
 ## 2. 测试 Isaac Lab GUI
 
 ```bash
-cd YOPO_isaac_lab
 ./scripts/start.sh --gui
 ```
 
@@ -23,22 +22,19 @@ cd YOPO_isaac_lab
 1) 查看程序参数（快速验证 Python 运行环境可用）：
 
 ```bash
-cd YOPO_isaac_lab
-./scripts/start.sh --editor --help
+./scripts/start.sh --env_editor --help
 ```
 
 2) GUI 模式下运行一次环境编辑测试：
 
 ```bash
-cd YOPO_isaac_lab
-./scripts/start.sh --editor
+./scripts/start.sh --env_editor
 ```
 
 3) 无界面执行一次程序测试（不生成文件）：
 
 ```bash
-cd YOPO_isaac_lab
-./scripts/start.sh --editor \
+./scripts/start.sh --env_editor \
   --headless \
   --close-after-build
 ```

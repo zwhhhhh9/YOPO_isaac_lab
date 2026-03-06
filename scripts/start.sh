@@ -115,7 +115,7 @@ show_help() {
     echo "Options:"
     echo "  -h, --help         Display this help message and exit"
     echo "  --gui              Start Isaac Lab GUI directly"
-    echo "  --editor           Run yopo_drone/env/drone_env_editor.py (GUI preview by default)"
+    echo "  --env_editor       Run yopo_drone/env/drone_env_editor.py (GUI preview by default)"
     echo "  --stop-all         Stop all running YOPO Isaac Lab containers"
     echo ""
     echo "Env:"
@@ -123,7 +123,7 @@ show_help() {
     echo ""
     echo "Example:"
     echo "  ./scripts/start.sh --gui"
-    echo "  ./scripts/start.sh --editor --help"
+    echo "  ./scripts/start.sh --env_editor --help"
     trap - EXIT INT TERM
     exit 0
 }
@@ -157,7 +157,7 @@ elif [ "${1:-}" = "--stop-all" ]; then
 elif [ "${1:-}" = "--gui" ]; then
     LAUNCH_GUI=1
     shift
-elif [ "${1:-}" = "--editor" ]; then
+elif [ "${1:-}" = "--env_editor" ]; then
     LAUNCH_EDITOR=1
     shift
 fi
@@ -176,11 +176,11 @@ if [ "$LAUNCH_GUI" -eq 1 ]; then
     export ENTRYPOINT="$ENTRYPOINT_CMD"
     echo "Setting ENTRYPOINT to Isaac Lab GUI: $ENTRYPOINT"
 elif [ "$LAUNCH_EDITOR" -eq 1 ]; then
-    ENTRYPOINT_CMD="/bin/bash -c \"/workspace/isaaclab/_isaac_sim/python.sh -c 'import pxr' >/dev/null 2>&1 || { echo 'Error: pxr module not found in image. Rebuild the Docker image.'; exit 1; }; /workspace/isaaclab/_isaac_sim/python.sh /workspace/isaaclab/yopo_drone/run.py yopo_drone/env/drone_env_editor.py $*\""
+    ENTRYPOINT_CMD="/bin/bash -c \"/workspace/isaaclab/_isaac_sim/python.sh -c 'import flatdict' >/dev/null 2>&1 || /workspace/isaaclab/_isaac_sim/python.sh -m pip install --no-cache-dir flatdict; /workspace/isaaclab/isaaclab.sh -p /workspace/isaaclab/yopo_drone/run.py yopo_drone/env/drone_env_editor.py $*\""
     export ENTRYPOINT="$ENTRYPOINT_CMD"
     echo "Setting ENTRYPOINT to drone_env_editor.py: $ENTRYPOINT"
 elif [ "$#" -ge 1 ]; then
-    ENTRYPOINT_CMD="/bin/bash -c \"/workspace/isaaclab/_isaac_sim/python.sh -c 'import pxr' >/dev/null 2>&1 || { echo 'Error: pxr module not found in image. Rebuild the Docker image.'; exit 1; }; /workspace/isaaclab/_isaac_sim/python.sh /workspace/isaaclab/yopo_drone/run.py $*\""
+    ENTRYPOINT_CMD="/bin/bash -c \"/workspace/isaaclab/_isaac_sim/python.sh -c 'import flatdict' >/dev/null 2>&1 || /workspace/isaaclab/_isaac_sim/python.sh -m pip install --no-cache-dir flatdict; /workspace/isaaclab/isaaclab.sh -p /workspace/isaaclab/yopo_drone/run.py $*\""
     export ENTRYPOINT="$ENTRYPOINT_CMD"
     echo "Setting ENTRYPOINT to: $ENTRYPOINT"
 else
