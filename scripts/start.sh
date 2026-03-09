@@ -12,7 +12,6 @@ else
     echo "Using local BASE_DIR: $BASE_DIR"
 fi
 
-# Isaac Lab's launcher script calls `tabs 4`; TERM=dumb makes it fail immediately.
 if [ -z "${TERM:-}" ] || [ "${TERM:-}" = "dumb" ]; then
     export TERM="xterm-256color"
 fi
@@ -21,8 +20,6 @@ TIMESTAMP=$(date +%Y%m%d%H%M%S)
 PROJECT_NAME="yopo_isaaclab_${TIMESTAMP}"
 DOCKER_COMPOSE_FILE="$(dirname "$SCRIPT_DIR")/env_tools/docker/isaaclab/docker-compose.yml"
 
-# ---- NEW: default to no extra installs (no RL frameworks) ----
-# Dockerfile / docker-compose should consume this variable.
 export ISAACLAB_INSTALL_MODE="${ISAACLAB_INSTALL_MODE:-none}"
 echo "ISAACLAB_INSTALL_MODE=${ISAACLAB_INSTALL_MODE}"
 
@@ -113,17 +110,20 @@ show_help() {
     echo "Before first run: ./scripts/init.sh"
     echo ""
     echo "Options:"
-    echo "  -h, --help         Display this help message and exit"
-    echo "  --gui              Start Isaac Lab GUI directly"
-    echo "  --env_editor       Run yopo_drone/env/drone_env_editor.py (GUI preview by default)"
-    echo "  --stop-all         Stop all running YOPO Isaac Lab containers"
+    echo "  -h, --help        Display this help message and exit"
+    echo "  --gui             Start Isaac Lab GUI directly"
+    echo "  --env_editor      Run yopo_drone/env/drone_env_editor.py (GUI preview by default)"
+    echo "  --ros2-node       Run a ROS 2 Python node with system Python inside the container"
+    echo "  --stop-all        Stop all running YOPO Isaac Lab containers"
     echo ""
     echo "Env:"
     echo "  ISAACLAB_INSTALL_MODE=none   (default) Skip extra installs (RL frameworks)"
+    echo "  ROS_DISTRO=jazzy             ROS 2 distro used for --ros2-node and sidecar setup"
     echo ""
     echo "Example:"
     echo "  ./scripts/start.sh --gui"
     echo "  ./scripts/start.sh --env_editor --help"
+    echo "  ./scripts/start.sh --ros2-node yopo_drone/tasks/hover_initial_position.py"
     trap - EXIT INT TERM
     exit 0
 }
@@ -149,6 +149,14 @@ stop_all_containers() {
 
 LAUNCH_GUI=0
 LAUNCH_EDITOR=0
+LAUNCH_ROS2_NODE=0
+
+ROS_DISTRO="${ROS_DISTRO:-jazzy}"
+ROS_WS="/workspace/isaaclab/ros2_ws"
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+ROS_PREPARE_CMD="if [ -d ${ROS_WS}/src ]; then source /opt/ros/${ROS_DISTRO}/setup.bash >/dev/null 2>&1; if [ ! -f ${ROS_WS}/install/setup.bash ]; then cd ${ROS_WS} && colcon build --merge-install --symlink-install; fi; for d in ${ROS_WS}/build ${ROS_WS}/install ${ROS_WS}/log; do [ -e "\$d" ] && chown -R ${HOST_UID}:${HOST_GID} "\$d" || true; done; cd /workspace/isaaclab; fi;"
+ROS_SOURCE_CMD="source /opt/ros/${ROS_DISTRO}/setup.bash >/dev/null 2>&1; [ -f ${ROS_WS}/install/setup.bash ] && source ${ROS_WS}/install/setup.bash >/dev/null 2>&1 || true;"
 
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
     show_help
@@ -159,6 +167,9 @@ elif [ "${1:-}" = "--gui" ]; then
     shift
 elif [ "${1:-}" = "--env_editor" ]; then
     LAUNCH_EDITOR=1
+    shift
+elif [ "${1:-}" = "--ros2-node" ]; then
+    LAUNCH_ROS2_NODE=1
     shift
 fi
 
@@ -172,15 +183,24 @@ if [ "$LAUNCH_GUI" -eq 1 ]; then
         trap - EXIT INT TERM
         exit 1
     fi
-    ENTRYPOINT_CMD="/bin/bash -c \"/workspace/isaaclab/isaaclab.sh -s\""
+    ENTRYPOINT_CMD='/bin/bash -c "/workspace/isaaclab/isaaclab.sh -s"'
     export ENTRYPOINT="$ENTRYPOINT_CMD"
     echo "Setting ENTRYPOINT to Isaac Lab GUI: $ENTRYPOINT"
 elif [ "$LAUNCH_EDITOR" -eq 1 ]; then
-    ENTRYPOINT_CMD="/bin/bash -c \"/workspace/isaaclab/_isaac_sim/python.sh -c 'import flatdict' >/dev/null 2>&1 || { echo 'Error: python package flatdict is missing in image yopo-isaaclab-base. Rebuild image: docker compose -f /workspace/isaaclab/env_tools/docker/isaaclab/docker-compose.yml build yopo'; exit 32; }; /workspace/isaaclab/isaaclab.sh -p /workspace/isaaclab/yopo_drone/run.py yopo_drone/env/drone_env_editor.py $*\""
+    ENTRYPOINT_CMD="/bin/bash -lc \"${ROS_PREPARE_CMD} /workspace/isaaclab/_isaac_sim/python.sh -c 'import flatdict' >/dev/null 2>&1 || { echo 'Error: python package flatdict is missing in image yopo-isaaclab-base. Rebuild image: docker compose -f /workspace/isaaclab/env_tools/docker/isaaclab/docker-compose.yml build yopo'; exit 32; }; /workspace/isaaclab/isaaclab.sh -p /workspace/isaaclab/yopo_drone/run.py yopo_drone/env/drone_env_editor.py $*\""
     export ENTRYPOINT="$ENTRYPOINT_CMD"
     echo "Setting ENTRYPOINT to drone_env_editor.py: $ENTRYPOINT"
+elif [ "$LAUNCH_ROS2_NODE" -eq 1 ]; then
+    if [ "$#" -lt 1 ]; then
+        echo "Error: --ros2-node requires a Python script path."
+        trap - EXIT INT TERM
+        exit 1
+    fi
+    ENTRYPOINT_CMD="/bin/bash -lc \"${ROS_PREPARE_CMD} ${ROS_SOURCE_CMD} /usr/bin/python3 $*\""
+    export ENTRYPOINT="$ENTRYPOINT_CMD"
+    echo "Setting ENTRYPOINT to ROS 2 node: $ENTRYPOINT"
 elif [ "$#" -ge 1 ]; then
-    ENTRYPOINT_CMD="/bin/bash -c \"/workspace/isaaclab/_isaac_sim/python.sh -c 'import flatdict' >/dev/null 2>&1 || { echo 'Error: python package flatdict is missing in image yopo-isaaclab-base. Rebuild image: docker compose -f /workspace/isaaclab/env_tools/docker/isaaclab/docker-compose.yml build yopo'; exit 32; }; /workspace/isaaclab/isaaclab.sh -p /workspace/isaaclab/yopo_drone/run.py $*\""
+    ENTRYPOINT_CMD="/bin/bash -lc \"${ROS_PREPARE_CMD} /workspace/isaaclab/_isaac_sim/python.sh -c 'import flatdict' >/dev/null 2>&1 || { echo 'Error: python package flatdict is missing in image yopo-isaaclab-base. Rebuild image: docker compose -f /workspace/isaaclab/env_tools/docker/isaaclab/docker-compose.yml build yopo'; exit 32; }; /workspace/isaaclab/isaaclab.sh -p /workspace/isaaclab/yopo_drone/run.py $*\""
     export ENTRYPOINT="$ENTRYPOINT_CMD"
     echo "Setting ENTRYPOINT to: $ENTRYPOINT"
 else

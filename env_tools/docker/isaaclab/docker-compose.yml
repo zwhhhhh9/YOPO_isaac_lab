@@ -44,6 +44,9 @@ x-default-isaac-lab-volumes: &default-isaac-lab-volumes
   - type: bind
     source: ${PROJECT_ROOT}/logs
     target: ${DOCKER_ISAACLAB_PATH}/logs
+  - type: bind
+    source: ${PROJECT_ROOT}/ros2_ws
+    target: ${DOCKER_ISAACLAB_PATH}/ros2_ws
   - type: volume
     source: isaac-lab-data
     target: ${DOCKER_ISAACLAB_PATH}/data_storage

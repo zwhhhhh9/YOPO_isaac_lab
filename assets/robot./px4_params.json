@@ -1,0 +1,20 @@
+{
+  "motor_thrust_max": 4.5,
+  "kappa": 0.015,
+  "ctrl_thrust_ratio": 0.6,
+  "pos_kp": [2.0, 2.0, 2.0],
+  "vel_kp": [8.0, 8.0, 8.0],
+  "attitude_fb_kp": [20.0, 20.0, 20.0],
+  "max_bodyrate_fb": 4.0,
+  "max_angle_deg": 30.0,
+  "min_collective_acc": 3.0,
+  "att_p_gain": [4.5, 4.5, 2.0],
+  "att_rate_limit": [2.5, 2.5, 2.0],
+  "att_yaw_weight": 0.4,
+  "rate_p_gain": [0.02, 0.03, 0.015],
+  "rate_i_gain": [0.02, 0.02, 0.015],
+  "rate_d_gain": [0.0015, 0.002, 0.0008],
+  "rate_k_gain": [1.0, 1.0, 1.0],
+  "rate_int_limit": [0.2, 0.2, 0.15],
+  "accel_filter_coef": 0.5
+}

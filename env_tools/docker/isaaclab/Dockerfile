@@ -23,6 +23,7 @@ ENV REINSTALL_TORCH=${REINSTALL_TORCH}
 
 ENV LANG=C.UTF-8
 ENV DEBIAN_FRONTEND=noninteractive
+ENV ROS_DISTRO=jazzy
 
 USER root
 
@@ -30,9 +31,30 @@ RUN --mount=type=cache,target=/var/cache/apt \
     apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
+    curl \
     git \
+    gnupg \
     libglib2.0-0 \
-    ncurses-term && \
+    lsb-release \
+    ncurses-term \
+    software-properties-common && \
+    apt-get -y autoremove && apt-get clean autoclean && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=cache,target=/var/cache/apt \
+    add-apt-repository universe && \
+    curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo ${UBUNTU_CODENAME}) main" > /etc/apt/sources.list.d/ros2.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    ros-${ROS_DISTRO}-ros-base \
+    ros-${ROS_DISTRO}-geometry-msgs \
+    ros-${ROS_DISTRO}-nav-msgs \
+    ros-${ROS_DISTRO}-sensor-msgs \
+    ros-${ROS_DISTRO}-std-msgs \
+    ros-${ROS_DISTRO}-rmw-cyclonedds-cpp \
+    ros-${ROS_DISTRO}-rmw-fastrtps-cpp \
+    python3-colcon-common-extensions \
+    ros-dev-tools && \
     apt-get -y autoremove && apt-get clean autoclean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -78,32 +100,13 @@ RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
     ${ISAACLAB_PATH}/isaaclab.sh --install none
 
 # Required by yopo_drone/env/drone_env_editor.py.
-# Install pxr as a standalone Docker layer via usd-core.
-RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
-    ${ISAACLAB_PATH}/isaaclab.sh -p -m pip install --no-cache-dir \
-    "usd-core>=25.2.post1,<26" && \
-    ${ISAACLAB_PATH}/_isaac_sim/python.sh -c "import pxr; print('pxr import check: OK')"
+# Isaac Sim 5.1 images often already provide pxr, so only fetch usd-core if import fails.
+RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip     ${ISAACLAB_PATH}/_isaac_sim/python.sh -c "import pxr; print('pxr import check: OK')" ||     (${ISAACLAB_PATH}/isaaclab.sh -p -m pip install --no-cache-dir "usd-core>=25.2.post1,<26" &&      ${ISAACLAB_PATH}/_isaac_sim/python.sh -c "import pxr; print('pxr import check: OK')")
 
-# Extra utilities (safe)
+# Required by Isaac Lab app startup and checked by scripts/start.sh.
 RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
     ${ISAACLAB_PATH}/isaaclab.sh -p -m pip install --no-build-isolation --no-cache-dir \
-    flatdict==4.0.1 \
-    && ${ISAACLAB_PATH}/isaaclab.sh -p -m pip install --no-cache-dir \
-    prettytable==3.3.0 \
-    "onnx>=1.18.0" \
-    hidapi==0.14.0.post2 \
-    gymnasium==1.2.1 \
-    "pyglet<2" \
-    transformers==4.57.6 \
-    einops \
-    warp-lang \
-    pytest \
-    pytest-mock \
-    junitparser \
-    flaky \
-    pynput \
-    debugpy \
-    rtree
+    flatdict==4.0.1
 
 # Optional: do NOT override Isaac Sim / Isaac Lab prebundled torch by default.
 # Enable only if you know you need it: --build-arg REINSTALL_TORCH=1

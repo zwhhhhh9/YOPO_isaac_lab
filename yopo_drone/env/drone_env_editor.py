@@ -23,6 +23,8 @@ from typing import Any, Iterable
 with contextlib.suppress(ModuleNotFoundError):
     import isaacsim  # noqa: F401
 
+from yopo_drone.utils.robot_model import DEFAULT_ROBOT_URDF
+
 try:
     from isaaclab.app import AppLauncher
 except ImportError:
@@ -370,7 +372,7 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--distant-translate", type=float, nargs=3, default=(0.0, 0.0, 25.0))
     parser.add_argument("--distant-rotate-xyz", type=float, nargs=3, default=(-50.0, 35.0, 0.0))
 
-    parser.add_argument("--robot-urdf", type=str, default="assets/robot./robot.urdf")
+    parser.add_argument("--robot-urdf", type=str, default=DEFAULT_ROBOT_URDF)
     parser.add_argument("--robot-prim-path", type=str, default="/World/Robot")
     parser.add_argument("--robot-init-pos", type=float, nargs=3, default=(0.0, 0.0, 1.0))
     parser.add_argument("--robot-init-rot", type=float, nargs=4, default=(1.0, 0.0, 0.0, 0.0))
@@ -388,14 +390,14 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tiled-cam-width",
         type=int,
-        default=8,
-        help="Tiled camera width (YOPO depth observation style default is 8).",
+        default=160,
+        help="Tiled camera width (default is 160).",
     )
     parser.add_argument(
         "--tiled-cam-height",
         type=int,
-        default=8,
-        help="Tiled camera height (YOPO depth observation style default is 8).",
+        default=96,
+        help="Tiled camera height (default is 96).",
     )
     parser.add_argument("--tiled-cam-update-period", type=float, default=0.0)
     parser.add_argument("--tiled-cam-offset-pos", type=float, nargs=3, default=(0.35, 0.0, 0.12))
@@ -435,6 +437,48 @@ def _create_new_stage() -> Usd.Stage:
     stage = omni.usd.get_context().get_stage()
     if stage is None:
         raise RuntimeError("Cannot obtain current USD stage from Isaac Sim.")
+    return stage
+
+
+def _get_current_stage() -> Usd.Stage:
+    import omni.usd
+
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        raise RuntimeError("Cannot obtain current USD stage from Isaac Sim.")
+    return stage
+
+
+def initialize_scene_from_editor(
+    *,
+    sim_utils: Any,
+    world_path: str = "/World",
+    create_new_stage: bool = True,
+    clear_existing_world: bool = True,
+    add_lights: bool = True,
+    add_ground: bool = True,
+) -> Usd.Stage:
+    """Initialize the current Isaac stage with the editor's basic scene primitives.
+
+    This helper is reusable from other Isaac Python programs, e.g. planner/control
+    entry points that want the same ground/light world setup as `drone_env_editor.py`
+    without creating a separate `SimulationContext` or spawning the robot twice.
+    """
+    if not world_path.startswith("/"):
+        raise ValueError("world_path must be an absolute USD path like /World")
+
+    _ensure_pxr_imported()
+    stage = _create_new_stage() if create_new_stage else _get_current_stage()
+    _configure_stage(stage)
+
+    if clear_existing_world:
+        _clear_path(stage, world_path)
+
+    _define_world(stage, world_path)
+    if add_lights:
+        _add_lights(world_path, sim_utils=sim_utils)
+    if add_ground:
+        _add_ground(world_path, sim_utils=sim_utils)
     return stage
 
 

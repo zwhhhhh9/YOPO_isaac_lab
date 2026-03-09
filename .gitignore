@@ -4,6 +4,12 @@ yopo_drone/assets/
 # Runtime logs/artifacts
 logs/
 *.log
+yopo_drone/data/*.csv
+
+# ROS 2 build outputs
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
 
 # Python cache
 __pycache__/
