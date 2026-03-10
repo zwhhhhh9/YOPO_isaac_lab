@@ -177,6 +177,32 @@ def _add_ground(world_path: str, *, sim_utils: Any) -> None:
     print(f"Ground plane added at {world_path}/Ground (500x500).", flush=True)
 
 
+def _add_world_origin_frame(world_path: str) -> None:
+    """Add a fixed world-frame marker at the scene origin."""
+    try:
+        import numpy as np
+
+        from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+        from isaaclab.markers.config import FRAME_MARKER_CFG
+    except Exception as exc:
+        print(f"World origin frame warning: {exc!r}", flush=True)
+        return
+
+    frame_marker_cfg = FRAME_MARKER_CFG.markers["frame"].copy()
+    frame_marker_cfg.scale = (0.15, 0.15, 0.15)
+    marker_cfg = VisualizationMarkersCfg(
+        prim_path=f"{world_path}/Visuals/WorldOriginFrame",
+        markers={"frame": frame_marker_cfg},
+    )
+    marker = VisualizationMarkers(marker_cfg)
+    marker.visualize(
+        translations=np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
+        orientations=np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32),
+        marker_indices=np.array([0], dtype=np.int32),
+    )
+    print(f"World origin frame added at {world_path} origin.", flush=True)
+
+
 def _add_robot_from_urdf(args: argparse.Namespace, robot_urdf_path: Path, *, sim_utils: Any) -> None:
     robot_cfg = sim_utils.UrdfFileCfg(
         asset_path=str(robot_urdf_path),
@@ -479,6 +505,7 @@ def initialize_scene_from_editor(
         _add_lights(world_path, sim_utils=sim_utils)
     if add_ground:
         _add_ground(world_path, sim_utils=sim_utils)
+    _add_world_origin_frame(world_path)
     return stage
 
 
@@ -575,6 +602,7 @@ def main() -> int:
         _define_world(stage, args.world_path)
         _add_lights(args.world_path, sim_utils=sim_utils)
         _add_ground(args.world_path, sim_utils=sim_utils)
+        _add_world_origin_frame(args.world_path)
         _add_robot_from_urdf(args, robot_urdf_path, sim_utils=sim_utils)
 
         tiled_camera = None

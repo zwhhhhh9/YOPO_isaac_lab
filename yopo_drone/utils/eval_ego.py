@@ -59,7 +59,7 @@ def _normalize_csv_log_path(path_str: str, *, default_filename: str | None = Non
 
 
 def _default_hover_telemetry_filename() -> str:
-    return f"hvoer_{_RUN_LOG_TIMESTAMP}.csv"
+    return f"hover_{_RUN_LOG_TIMESTAMP}.csv"
 
 
 def _ensure_isaaclab_pythonpath() -> None:
@@ -318,12 +318,50 @@ def _parse_arguments() -> argparse.Namespace:
         help="Maximum number of closed-loop hover warm-up steps to run before starting telemetry and command handling.",
     )
     parser.add_argument(
+        "--auto_target_goal",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar=("X", "Y", "Z"),
+        help="Internal target-goal mission final position in world coordinates.",
+    )
+    parser.add_argument(
+        "--auto_target_goal_initial_hover_s",
+        type=float,
+        default=0.0,
+        help="Seconds to hover at the startup position before flying to --auto_target_goal.",
+    )
+    parser.add_argument(
+        "--auto_target_goal_max_speed",
+        type=float,
+        default=1.0,
+        help="Approximate maximum speed in m/s used by the internal target-goal reference generator.",
+    )
+    parser.add_argument(
+        "--auto_target_goal_reach_tolerance",
+        type=float,
+        default=0.15,
+        help="Position tolerance in meters for considering --auto_target_goal reached.",
+    )
+    parser.add_argument(
+        "--auto_target_goal_settle_speed",
+        type=float,
+        default=0.15,
+        help="Speed threshold in m/s for considering the drone settled at --auto_target_goal.",
+    )
+    parser.add_argument(
+        "--auto_target_goal_lookahead_s",
+        type=float,
+        default=0.25,
+        help="Lookahead horizon in seconds used to build the internal speed-limited target-goal reference.",
+    )
+    parser.add_argument(
         "--telemetry_log_path",
         type=str,
         default=_default_hover_telemetry_filename(),
         help=(
             "CSV path for per-step hover telemetry. Defaults to a per-run file named "
-            "hvoer_YYYYMMDD_HHMMSS.csv under yopo_drone/logs/."
+            "hover_YYYYMMDD_HHMMSS.csv under yopo_drone/logs/."
         ),
     )
     parser.add_argument(
@@ -817,6 +855,20 @@ def main() -> None:
             self._telemetry_writer = None
             self._last_reset_flags = np.zeros((self._num_envs,), dtype=bool)
             self._startup_hover_settle_steps = max(0, int(args_cli.startup_hover_settle_steps))
+            self._auto_target_goal = (
+                np.array(args_cli.auto_target_goal, dtype=np.float32).reshape(3)
+                if args_cli.auto_target_goal is not None
+                else None
+            )
+            self._auto_target_goal_initial_hover_s = max(0.0, float(args_cli.auto_target_goal_initial_hover_s))
+            self._auto_target_goal_max_speed = max(0.0, float(args_cli.auto_target_goal_max_speed))
+            self._auto_target_goal_reach_tolerance = max(1e-3, float(args_cli.auto_target_goal_reach_tolerance))
+            self._auto_target_goal_settle_speed = max(0.0, float(args_cli.auto_target_goal_settle_speed))
+            self._auto_target_goal_lookahead_s = max(self._physics_dt, float(args_cli.auto_target_goal_lookahead_s))
+            self._auto_target_goal_start_time = 0.0
+            self._auto_target_goal_phase = "idle"
+            self._auto_target_goal_reached = False
+            self._auto_target_goal_speed_cmd = 0.0
             self._enable_rotor_spin_visual = (not bool(getattr(args_cli, "headless", False))) and (not args_cli.disable_rotor_spin_visual)
             self._rotor_spin_visual_scale = max(0.0, float(args_cli.rotor_spin_visual_scale))
             self._rotor_joint_ids: list[int] = []
@@ -899,6 +951,8 @@ def main() -> None:
             self._run_startup_hover_settle()
             self._log_controller_model(ctrl_model)
             self._log_controller_tuning()
+            self._log_auto_target_goal_plan()
+            self._restart_auto_target_goal_task(reason="startup")
 
             if self._ros_enabled:
                 self._depth_pub = self.create_publisher(Image, depth_topic, 10)
@@ -1262,6 +1316,33 @@ def main() -> None:
                 f"accel_filter_coef={float(self._controller.accel_filter_coef):.4f}"
             )
 
+        def _log_auto_target_goal_plan(self) -> None:
+            if self._auto_target_goal is None:
+                return
+            goal = self._auto_target_goal
+            self.get_logger().info(
+                "Configured internal target-goal task: "
+                f"goal=({goal[0]:.3f}, {goal[1]:.3f}, {goal[2]:.3f}), "
+                f"startup_hover={self._auto_target_goal_initial_hover_s:.2f}s, "
+                f"max_speed={self._auto_target_goal_max_speed:.3f} m/s, "
+                f"reach_tol={self._auto_target_goal_reach_tolerance:.3f} m, "
+                f"settle_speed={self._auto_target_goal_settle_speed:.3f} m/s."
+            )
+
+        def _restart_auto_target_goal_task(self, *, reason: str) -> None:
+            if self._auto_target_goal is None:
+                return
+            self._auto_target_goal_start_time = float(self._current_sim_time)
+            self._auto_target_goal_phase = "idle"
+            self._auto_target_goal_reached = False
+            self._auto_target_goal_speed_cmd = 0.0
+            if reason != "startup":
+                self.get_logger().info(
+                    "Restarted internal target-goal task "
+                    f"after {reason}: goal=({self._auto_target_goal[0]:.3f}, "
+                    f"{self._auto_target_goal[1]:.3f}, {self._auto_target_goal[2]:.3f})."
+                )
+
         def _refresh_hold_target(
             self,
             state: Optional[np.ndarray],
@@ -1304,6 +1385,117 @@ def main() -> None:
                 return
             self._set_hover_command()
 
+        def _apply_default_command(self) -> None:
+            if self._apply_auto_target_goal_command():
+                return
+            self._apply_timeout_hold()
+
+        def _apply_auto_target_goal_command(self) -> bool:
+            if self._auto_target_goal is None or self._last_state is None or self._reset_pos is None:
+                return False
+
+            mission_time = max(0.0, float(self._current_sim_time) - float(self._auto_target_goal_start_time))
+            yaw = float(self._reset_yaw) if self._reset_yaw is not None else 0.0
+
+            if mission_time < self._auto_target_goal_initial_hover_s:
+                if self._auto_target_goal_phase != "startup_hover":
+                    self._auto_target_goal_phase = "startup_hover"
+                    self._auto_target_goal_speed_cmd = 0.0
+                    self.get_logger().info(
+                        "Internal target-goal task: "
+                        f"holding startup position for {self._auto_target_goal_initial_hover_s:.2f}s "
+                        f"before flying to ({self._auto_target_goal[0]:.3f}, "
+                        f"{self._auto_target_goal[1]:.3f}, {self._auto_target_goal[2]:.3f})."
+                    )
+                self._apply_position_command(
+                    np.array(self._reset_pos, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    yaw,
+                    0.0,
+                )
+                return True
+
+            pos = np.array(self._last_state[:3], dtype=np.float32)
+            vel = (
+                np.array(self._last_state[7:10], dtype=np.float32)
+                if self._last_state.size >= 10
+                else np.zeros(3, dtype=np.float32)
+            )
+            delta = np.array(self._auto_target_goal, dtype=np.float32) - pos
+            dist = float(np.linalg.norm(delta))
+            speed = float(np.linalg.norm(vel))
+
+            if self._auto_target_goal_reached or (
+                dist <= self._auto_target_goal_reach_tolerance and speed <= self._auto_target_goal_settle_speed
+            ):
+                if self._auto_target_goal_phase != "goal_hold":
+                    self._auto_target_goal_phase = "goal_hold"
+                    self._auto_target_goal_reached = True
+                    self._auto_target_goal_speed_cmd = 0.0
+                    self.get_logger().info(
+                        "Internal target-goal task: "
+                        f"goal reached at ({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}), "
+                        f"remaining_dist={dist:.3f} m, speed={speed:.3f} m/s. Holding target."
+                    )
+                self._apply_position_command(
+                    np.array(self._auto_target_goal, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    yaw,
+                    0.0,
+                )
+                return True
+
+            if self._auto_target_goal_phase != "cruise":
+                self._auto_target_goal_phase = "cruise"
+                self.get_logger().info(
+                    "Internal target-goal task: "
+                    f"flying toward ({self._auto_target_goal[0]:.3f}, {self._auto_target_goal[1]:.3f}, "
+                    f"{self._auto_target_goal[2]:.3f}) with max_speed={self._auto_target_goal_max_speed:.3f} m/s."
+                )
+
+            if dist > 1e-6:
+                direction = delta / dist
+            else:
+                direction = np.zeros(3, dtype=np.float32)
+
+            brake_acc = max(0.5, self._auto_target_goal_max_speed)
+            accel_limit = max(0.08, self._auto_target_goal_max_speed * 0.15)
+            cruise_speed_cap = self._auto_target_goal_max_speed * 0.97
+            braking_limited_speed = math.sqrt(max(0.0, 2.0 * brake_acc * max(dist - self._auto_target_goal_reach_tolerance, 0.0)))
+            desired_speed_target = min(cruise_speed_cap, braking_limited_speed)
+            speed_excess = max(0.0, speed - cruise_speed_cap)
+            if speed_excess > 0.0:
+                desired_speed_target = max(0.0, min(desired_speed_target, cruise_speed_cap - 2.0 * speed_excess))
+            speed_step_limit = accel_limit * self._physics_dt
+            speed_delta = np.clip(
+                desired_speed_target - self._auto_target_goal_speed_cmd,
+                -speed_step_limit,
+                speed_step_limit,
+            )
+            self._auto_target_goal_speed_cmd = max(0.0, self._auto_target_goal_speed_cmd + float(speed_delta))
+
+            desired_speed = self._auto_target_goal_speed_cmd
+            desired_vel = direction * desired_speed
+            lookahead_horizon = min(self._physics_dt, self._auto_target_goal_lookahead_s)
+            min_position_step = min(0.0025, dist)
+            desired_pos = pos + direction * min(
+                dist,
+                max(desired_speed * lookahead_horizon, min_position_step),
+            )
+            self._apply_position_command(
+                desired_pos.astype(np.float32),
+                desired_vel.astype(np.float32),
+                np.zeros(3, dtype=np.float32),
+                np.zeros(3, dtype=np.float32),
+                yaw,
+                0.0,
+            )
+            return True
+
         def _update_reset_buffers(self) -> None:
             if hasattr(self._unwrapped, "_get_dones"):
                 reset_terminated, reset_time_outs = self._unwrapped._get_dones()
@@ -1319,6 +1511,8 @@ def main() -> None:
             self._unwrapped.reset_buf = reset_terminated | reset_time_outs
 
         def _goal_position_for_publish(self) -> Optional[np.ndarray]:
+            if self._auto_target_goal is not None:
+                return np.array(self._auto_target_goal, copy=True)
             desired_pos = getattr(self._unwrapped, "_desired_pos_w", None)
             if desired_pos is not None:
                 with contextlib.suppress(Exception):
@@ -1464,7 +1658,7 @@ def main() -> None:
                 # This avoids using a stale startup pose on the first control step.
                 self._cache_state()
                 if (not self._has_received_position_command) or (self._current_sim_time - self._last_cmd_time > 1.0):
-                    self._apply_timeout_hold()
+                    self._apply_default_command()
                 start_time = time.time()
                 self._step_env()
                 # NOTE: publishing image here will introduce significant delay
@@ -1472,7 +1666,7 @@ def main() -> None:
                 #     self._publish_depth(self._current_sim_time)
                 #     next_step = sim_time + render_interval
                 if (not self._has_received_position_command) or (self._current_sim_time - self._last_cmd_time > 1.0):
-                    self._apply_timeout_hold()
+                    self._apply_default_command()
                 # print(f"Simulation time: {time.time() - start_time}")
                 if self._reset_log_done:
                     break
@@ -1498,9 +1692,17 @@ def main() -> None:
                     "Startup hover settle complete: "
                     f"state=({settle_pos[0]:.3f}, {settle_pos[1]:.3f}, {settle_pos[2]:.3f}), "
                     f"err_to_start=({settle_err[0]:.3f}, {settle_err[1]:.3f}, {settle_err[2]:.3f}), "
-                    f"speed={settle_speed:.3f} m/s. "
-                    "Keeping the original startup pose as the hover target."
+                    f"speed={settle_speed:.3f} m/s."
                 )
+                if self._auto_target_goal is not None:
+                    # Use the stabilized pose as the mission start hover point so
+                    # target-goal runs do not begin with a visible altitude sag.
+                    self._refresh_hold_target(
+                        settle_state,
+                        reason="startup_settle",
+                        apply_command=False,
+                        log_update=True,
+                    )
                 self._set_hover_command()
             self._current_sim_time = 0.0
             self._last_cmd_time = 0.0
@@ -1524,6 +1726,7 @@ def main() -> None:
                 self._unwrapped.sim.render()
                 state = self._robot.data.root_state_w[self._drone_id].detach().cpu().numpy()
                 self._refresh_hold_target(state, reason="env_reset", apply_command=True, log_update=True)
+                self._restart_auto_target_goal_task(reason="env_reset")
                 self._controller.reset(reset_env_ids)
 
             if getattr(self._unwrapped, "_tiled_camera", None) is not None:
@@ -1736,10 +1939,11 @@ def main() -> None:
             roll, pitch, yaw = self._quaternion_to_euler_zyx(tuple(float(v) for v in state[3:7]))
             bodyrate = np.array(state[10:13], dtype=np.float64)
 
-            if self._reset_pos is None:
+            published_goal = self._goal_position_for_publish()
+            if published_goal is None:
                 target_pos = np.full(3, np.nan, dtype=np.float64)
             else:
-                target_pos = np.array(self._reset_pos, dtype=np.float64)
+                target_pos = np.array(published_goal, dtype=np.float64)
             target_yaw = float(self._reset_yaw) if self._reset_yaw is not None else float("nan")
             pos_err = target_pos - pos if np.all(np.isfinite(target_pos)) else np.full(3, np.nan, dtype=np.float64)
 

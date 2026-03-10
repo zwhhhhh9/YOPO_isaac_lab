@@ -93,24 +93,70 @@ This is the recommended entry point for drone hover checks. It first initializes
 GUI mode:
 
 ```bash
-./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py --num_envs 1
+./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py --hover --num_envs 1
 ```
 
 Headless mode:
 
 ```bash
-./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py --headless --num_envs 1
+./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py --hover --headless --num_envs 1
 ```
 
 Headless mode with automatic telemetry export:
 
 ```bash
-./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py --headless --num_envs 1
+./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py --hover --headless --num_envs 1
 ```
 
 Each hover / eval run automatically collects drone telemetry data into `yopo_drone/logs/`.
-The per-run CSV filename uses the form `hvoer_YYYYMMDD_HHMMSS.csv`, for example
-`hvoer_20260310_142530.csv`.
+The per-run CSV filename uses the form `hover_YYYYMMDD_HHMMSS.csv`, for example
+`hover_20260310_142530.csv`.
+
+### Run the `--target_goal` task
+
+`editor_scene_eval_ego.py` also supports an internal point-to-point task suffix: `--target_goal`.
+This task uses the same editor-style stage initialization as `--hover`, but the command flow is:
+
+1. Run a short closed-loop startup settle phase before telemetry and mission timing begin.
+2. Hover at the stabilized startup position for `--target_goal_hover_s` seconds.
+3. Fly toward `--target_goal_pos X Y Z` with the mission speed limited by `--target_goal_max_speed`.
+4. Hold position after reaching the target point.
+
+GUI mode with the default goal `(10, 0, 1)`:
+
+```bash
+./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py --target_goal --num_envs 1
+```
+
+Headless mode with the default goal:
+
+```bash
+./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py --target_goal --headless --num_envs 1
+```
+
+Headless mode with a custom world-frame goal, hover time, and speed limit:
+
+```bash
+./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py \
+  --target_goal \
+  --target_goal_pos 6 -4 1.5 \
+  --target_goal_hover_s 5.0 \
+  --target_goal_max_speed 1.0 \
+  --target_goal_startup_settle_steps 200 \
+  --headless \
+  --num_envs 1
+```
+
+Useful `--target_goal` options:
+
+- `--target_goal_pos X Y Z`: world-frame target point. This can be any reachable target point in the map.
+- `--target_goal_hover_s SECONDS`: startup hover time before the vehicle starts translating.
+- `--target_goal_max_speed MPS`: mission cruise speed limit.
+- `--target_goal_startup_settle_steps STEPS`: startup hover stabilization steps run before logging and mission timing start.
+
+Each `--target_goal` run also writes telemetry CSV data into `yopo_drone/logs/`.
+The per-run CSV filename uses the form `target_goal_YYYYMMDD_HHMMSS.csv`, for example
+`target_goal_20260310_161851.csv`.
 
 ### Run `eval_ego.py` directly
 
