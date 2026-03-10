@@ -34,6 +34,34 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+_CSV_LOG_DIR = _project_root() / "yopo_drone" / "logs"
+_CSV_DEFAULT_DIR_ALIASES = (
+    Path("."),
+    Path("yopo_drone/data"),
+    Path("yopo_drone/logs"),
+)
+_RUN_LOG_TIMESTAMP = time.strftime("%Y%m%d_%H%M%S")
+
+
+def _normalize_csv_log_path(path_str: str, *, default_filename: str | None = None) -> str:
+    raw_path = str(path_str).strip()
+    if not raw_path:
+        if default_filename is None:
+            return ""
+        return str((_CSV_LOG_DIR / default_filename).resolve())
+
+    path = Path(raw_path)
+    if path.is_absolute():
+        return str(path)
+    if path.parent in _CSV_DEFAULT_DIR_ALIASES:
+        return str((_CSV_LOG_DIR / path.name).resolve())
+    return str((_project_root() / path).resolve())
+
+
+def _default_hover_telemetry_filename() -> str:
+    return f"hvoer_{_RUN_LOG_TIMESTAMP}.csv"
+
+
 def _ensure_isaaclab_pythonpath() -> None:
     source_roots = (
         _project_root() / "source",
@@ -276,7 +304,12 @@ def _parse_arguments() -> argparse.Namespace:
         default=LEGACY_ACCEL_FILTER_COEF,
         help="Angular-acceleration low-pass coefficient used by the rate D-term [0, 1].",
     )
-    parser.add_argument("--reset_log_path", type=str, default="./yopo_drone/data/ego.csv", help="CSV path for reset stats.")
+    parser.add_argument(
+        "--reset_log_path",
+        type=str,
+        default="./yopo_drone/logs/ego.csv",
+        help="CSV path for reset stats. Relative default-style CSV paths are saved under yopo_drone/logs/.",
+    )
     parser.add_argument("--reset_log_count", type=int, default=26, help="Number of resets to log before stopping.")
     parser.add_argument(
         "--startup_hover_settle_steps",
@@ -287,8 +320,11 @@ def _parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--telemetry_log_path",
         type=str,
-        default="",
-        help="Optional CSV path for per-step hover telemetry.",
+        default=_default_hover_telemetry_filename(),
+        help=(
+            "CSV path for per-step hover telemetry. Defaults to a per-run file named "
+            "hvoer_YYYYMMDD_HHMMSS.csv under yopo_drone/logs/."
+        ),
     )
     parser.add_argument(
         "--disable_rotor_spin_visual",
@@ -767,13 +803,16 @@ def main() -> None:
             self._udp_cmd_socket: Optional[socket.socket] = None
             self._udp_state_socket: Optional[socket.socket] = None
             self._udp_state_target = (args_cli.ros2_state_host, int(args_cli.ros2_state_port))
-            self._reset_log_path = args_cli.reset_log_path
+            self._reset_log_path = _normalize_csv_log_path(args_cli.reset_log_path, default_filename="ego.csv")
             self._reset_log_target = max(0, int(args_cli.reset_log_count))
             self._reset_log_done = False
             self._reset_count = 0
             self._csv_header_written = False
             self._traj_buffers = [list() for _ in range(self._num_envs)]
-            self._telemetry_log_path = str(args_cli.telemetry_log_path).strip()
+            self._telemetry_log_path = _normalize_csv_log_path(
+                args_cli.telemetry_log_path,
+                default_filename=_default_hover_telemetry_filename(),
+            )
             self._telemetry_log_file = None
             self._telemetry_writer = None
             self._last_reset_flags = np.zeros((self._num_envs,), dtype=bool)
@@ -1685,6 +1724,7 @@ def main() -> None:
                 ]
             )
             self._telemetry_log_file.flush()
+            print(f"[Info] Telemetry CSV logging enabled: {log_path}")
             return True
 
         def _log_telemetry(self, timestamp: float) -> None:

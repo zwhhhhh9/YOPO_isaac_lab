@@ -28,6 +28,7 @@ Docker-based workspace for Isaac Lab, the YOPO drone scene editor, and the PX4-s
 scripts/                     Launcher scripts
 env_tools/docker/isaaclab/   Docker setup and Isaac Lab checkout
 yopo_drone/                  Editor, eval, controller, ROS bridge helpers
+yopo_drone/logs/             Drone telemetry and CSV data collected from hover/eval runs
 ros2_ws/                     ROS 2 workspace for custom message packages
 assets/                      Robot and scene assets
 logs/                        Host-side runtime logs
@@ -101,14 +102,15 @@ Headless mode:
 ./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py --headless --num_envs 1
 ```
 
-Headless mode with telemetry export:
+Headless mode with automatic telemetry export:
 
 ```bash
-./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py \
-  --headless \
-  --num_envs 1 \
-  --telemetry_log_path yopo_drone/data/hover.csv
+./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py --headless --num_envs 1
 ```
+
+Each hover / eval run automatically collects drone telemetry data into `yopo_drone/logs/`.
+The per-run CSV filename uses the form `hvoer_YYYYMMDD_HHMMSS.csv`, for example
+`hvoer_20260310_142530.csv`.
 
 ### Run `eval_ego.py` directly
 
