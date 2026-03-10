@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import math
+
+import numpy as np
 import isaaclab.sim as sim_utils
 from isaaclab.utils import configclass
 
@@ -20,14 +23,21 @@ _MOTOR_THRUST_MAX = float(_ROBOT_MODEL["motor_thrust_max"])
 _HOVER_RPS = 200.0
 _HOVER_THRUST_PER_MOTOR = float(_ROBOT_MODEL["mass"]) * 9.81 / max(len(_THRUSTER_NAMES), 1)
 _HOVER_THRUST_CONST = _HOVER_THRUST_PER_MOTOR / (_HOVER_RPS * _HOVER_RPS)
+_HOVER_WRENCH = np.array([float(_ROBOT_MODEL["mass"]) * 9.81, 0.0, 0.0, 0.0], dtype=np.float32)
+_HOVER_ALLOC = np.array(_ALLOCATION_MATRIX[2:6], dtype=np.float32)
+_HOVER_TRIM = np.linalg.pinv(_HOVER_ALLOC) @ _HOVER_WRENCH
+_HOVER_TRIM = np.clip(_HOVER_TRIM, 0.0, _MOTOR_THRUST_MAX)
+_INITIAL_RPS_BY_MOTOR = {
+    name: math.sqrt(float(thrust) / _HOVER_THRUST_CONST) for name, thrust in zip(_THRUSTER_NAMES, _HOVER_TRIM, strict=True)
+}
 
 
 YOPO_ROBOT_THRUSTER_CFG = ThrusterCfg(
     dt=0.01,
     thrust_range=(0.0, _MOTOR_THRUST_MAX),
     thrust_const_range=(_HOVER_THRUST_CONST, _HOVER_THRUST_CONST),
-    tau_inc_range=(0.05, 0.08),
-    tau_dec_range=(0.005, 0.005),
+    tau_inc_range=(0.02, 0.02),
+    tau_dec_range=(0.02, 0.02),
     torque_to_thrust_ratio=float(_ROBOT_MODEL["kappa"]),
     thruster_names_expr=_THRUSTER_NAMES,
 )
@@ -70,7 +80,7 @@ YOPO_ROBOT_CFG = MultirotorCfg(
         lin_vel=(0.0, 0.0, 0.0),
         ang_vel=(0.0, 0.0, 0.0),
         rot=(1.0, 0.0, 0.0, 0.0),
-        rps={name: _HOVER_RPS for name in _THRUSTER_NAMES},
+        rps=_INITIAL_RPS_BY_MOTOR,
     ),
     actuators={"thrusters": YOPO_ROBOT_THRUSTER_CFG},
     rotor_directions=_ROTOR_DIRECTIONS,
@@ -82,10 +92,30 @@ YOPO_ROBOT_CFG = MultirotorCfg(
 class NoObstacleEnvCfg(TrackPositionNoObstaclesEnvCfg):
     def __post_init__(self):
         super().__post_init__()
+        self.seed = 0
         self.scene.robot = YOPO_ROBOT_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.scene.robot.actuators["thrusters"].dt = self.sim.dt
+        self.scene.robot.spawn.articulation_props.solver_velocity_iteration_count = 1
         self.actions.thrust_command.clip = {".*": (0.0, _MOTOR_THRUST_MAX)}
         self.actions.thrust_command.preserve_order = True
+        self.episode_length_s = 300.0
+        self.sim.physx.enable_external_forces_every_iteration = True
+        self.events.reset_base.params["pose_range"] = {
+            "x": (0.0, 0.0),
+            "y": (0.0, 0.0),
+            "z": (1.0, 1.0),
+            "yaw": (0.0, 0.0),
+            "roll": (0.0, 0.0),
+            "pitch": (0.0, 0.0),
+        }
+        self.events.reset_base.params["velocity_range"] = {
+            "x": (0.0, 0.0),
+            "y": (0.0, 0.0),
+            "z": (0.0, 0.0),
+            "roll": (0.0, 0.0),
+            "pitch": (0.0, 0.0),
+            "yaw": (0.0, 0.0),
+        }
 
 
 @configclass

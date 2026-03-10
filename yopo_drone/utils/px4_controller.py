@@ -903,67 +903,20 @@ class PX4QuadrotorController:
         )
 
         # === Control allocation with motor dynamics ===
-        # Step 1: Compute baseline thrust
-        T0 = F_des / 4.0
-
-        # Step 2: Calculate differential thrust bounds for torque generation
-        # T_motor_max here is the available headroom for differential thrust
+        # Solve the full wrench directly so asymmetric rotor layouts and CoM offsets
+        # can maintain zero torque at hover without relying on an equal-thrust baseline.
         T_motor_max = self.dynamics.thrust_max_ * self.dynamics.thrust_ratio
-        T_motor_min = self.dynamics.thrust_min_
-        delta_T_max_pos = (T_motor_max - T0).clamp(min=0.0)
-        delta_T_max_neg = (T0 - T_motor_min).clamp(min=0.0)
+        full_wrench = torch.cat([F_des.unsqueeze(1), tau_des], dim=1)
+        motor_thrusts = torch.bmm(self.alloc_matrix_pinv_, full_wrench.unsqueeze(-1)).squeeze(-1)
 
-        # Step 3: Control allocation using PHYSICAL TORQUE (NO normalization)
-        # Build control wrench: [thrust, roll_torque, pitch_torque, yaw_torque]
-        # tau_des is PHYSICAL TORQUE in Nm from rate controller
-        torque_only_wrench = torch.cat([
-            torch.zeros_like(F_des).unsqueeze(1),  # thrust = 0 (differential only)
-            tau_des  # PHYSICAL torque [Nm]
-        ], dim=1)
-
-        # Use RAW pseudo-inverse for control allocation (no normalization)
-        delta_T = torch.bmm(self.alloc_matrix_pinv_, torque_only_wrench.unsqueeze(-1)).squeeze(-1)
-
-        # Step 4: Scale differential thrust to respect differential thrust bounds
-        # This scaling ensures differential thrust stays within the available headroom
-        # defined by thrust_ratio (e.g., if hovering at 50% throttle, only 50% headroom available)
-        # Add epsilon to avoid division by zero when thrust is near saturation
-        eps = 1e-6
-        pos_mask = delta_T > 0
-        neg_mask = delta_T < 0
-
-        # Safe division: clamp denominators to avoid division by very small numbers
-        delta_T_max_pos_safe = torch.clamp(delta_T_max_pos.unsqueeze(1), min=eps)
-        delta_T_max_neg_safe = torch.clamp(delta_T_max_neg.unsqueeze(1), min=eps)
-
-        scale_factors_pos = torch.where(pos_mask, delta_T / delta_T_max_pos_safe,
-                                        torch.zeros_like(delta_T))
-        scale_factors_neg = torch.where(neg_mask, -delta_T / delta_T_max_neg_safe,
-                                        torch.zeros_like(delta_T))
-
-        max_scale_per_batch, _ = torch.max(torch.maximum(scale_factors_pos, scale_factors_neg), dim=1, keepdim=True)
-
-        delta_T_scaling = torch.where(
-            max_scale_per_batch > 1.0,
-            1.0 / max_scale_per_batch,
-            torch.ones_like(max_scale_per_batch)
-        )
-        delta_T = delta_T * delta_T_scaling
-
-        # Step 5: Combine baseline and differential thrust
-        motor_thrusts = T0.unsqueeze(1) + delta_T
-
-        # Step 6: Enforce non-negative thrust and zero throttle handling
+        # Step 1: Enforce non-negative thrust and zero throttle handling
         motor_thrusts = torch.clamp(motor_thrusts, min=0.0)
 
         # Zero throttle → zero thrust
         zero_throttle = (cmd[:, 3] == 0.0).unsqueeze(1)
         motor_thrusts = torch.where(zero_throttle, torch.zeros_like(motor_thrusts), motor_thrusts)
 
-        # Step 7: Limit per-motor maximum thrust to absolute physical limit
-        # This second-stage scaling ensures no motor exceeds thrust_max, even when
-        # baseline thrust T0 is high. The first scaling (Step 4) only ensures differential
-        # thrust respects the headroom defined by thrust_ratio.
+        # Step 2: Limit per-motor thrust to the commanded control headroom.
         thrust_max_expanded = T_motor_max.unsqueeze(1).expand_as(motor_thrusts)
         scale_factors = motor_thrusts / thrust_max_expanded
         max_scale_per_batch, _ = torch.max(scale_factors, dim=1, keepdim=True)
@@ -975,17 +928,17 @@ class PX4QuadrotorController:
         )
         motor_thrusts = motor_thrusts * scaling
 
-        # Step 8: Convert motor thrusts to motor speeds (PX4 mixer output)
+        # Step 3: Convert motor thrusts to motor speeds (PX4 mixer output)
         motor_speeds = self.dynamics.motorThrustToOmega(motor_thrusts)
 
-        # Step 9: Reconstruct resulting force & torque
+        # Step 4: Reconstruct resulting force & torque
         alloc = torch.bmm(self.alloc_matrix_, motor_thrusts.unsqueeze(-1)).squeeze(-1)
 
         force = torch.zeros((batch, 3), device=self.device)
         force[:, 2] = alloc[:, 0]  # Thrust in z-direction
         torque = alloc[:, 1:4]     # Torque [roll, pitch, yaw] in Nm
 
-        # Step 10: Saturation detection using PHYSICAL TORQUE (NO normalization needed)
+        # Step 5: Saturation detection using PHYSICAL TORQUE (NO normalization needed)
         # Both tau_des and torque are in Nm, can directly compare!
         unallocated_torque = tau_des - torque
 

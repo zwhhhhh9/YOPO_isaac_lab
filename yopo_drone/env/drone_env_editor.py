@@ -386,7 +386,7 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--robot-max-angular-velocity", type=float, default=1000.0)
 
     parser.add_argument("--disable-tiled-camera", action="store_true")
-    parser.add_argument("--tiled-cam-prim-path", type=str, default="/World/Robot/TiledCamera")
+    parser.add_argument("--tiled-cam-prim-path", type=str, default="/World/Robot/base_link/TiledCamera")
     parser.add_argument(
         "--tiled-cam-width",
         type=int,
@@ -400,7 +400,7 @@ def _build_argparser() -> argparse.ArgumentParser:
         help="Tiled camera height (default is 96).",
     )
     parser.add_argument("--tiled-cam-update-period", type=float, default=0.0)
-    parser.add_argument("--tiled-cam-offset-pos", type=float, nargs=3, default=(0.35, 0.0, 0.12))
+    parser.add_argument("--tiled-cam-offset-pos", type=float, nargs=3, default=(0.20, 0.0, 0.0))
     parser.add_argument("--tiled-cam-offset-rot", type=float, nargs=4, default=(1.0, 0.0, 0.0, 0.0))
     parser.add_argument(
         "--tiled-cam-offset-convention",
@@ -547,7 +547,7 @@ def main() -> int:
     if not args.robot_prim_path.startswith("/"):
         parser.error("--robot-prim-path must be an absolute USD path like /World/Robot")
     if not args.tiled_cam_prim_path.startswith("/"):
-        parser.error("--tiled-cam-prim-path must be an absolute USD path like /World/Robot/TiledCamera")
+        parser.error("--tiled-cam-prim-path must be an absolute USD path like /World/Robot/base_link/TiledCamera")
     if args.tiled_cam_width <= 0 or args.tiled_cam_height <= 0:
         parser.error("--tiled-cam-width/--tiled-cam-height must be positive integers")
     if args.robot_contact_offset < args.robot_rest_offset:

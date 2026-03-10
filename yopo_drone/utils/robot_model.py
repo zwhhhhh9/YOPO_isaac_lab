@@ -53,7 +53,9 @@ def load_px4_robot_model(
         "params_path": str(resolved_params) if resolved_params.is_file() else None,
         "mass": urdf_data["mass"],
         "inertia": urdf_data["inertia"],
+        "base_com_offset": urdf_data.get("base_com_offset"),
         "arm_length": urdf_data["arm_length"],
+        "motors": [dict(motor) for motor in urdf_data["motors"]],
         "thruster_names": [motor["child_link"] for motor in urdf_data["motors"]],
         "rotor_directions": [int(motor["rotor_direction"]) for motor in urdf_data["motors"]],
         "allocation_matrix": _build_allocation_matrix(urdf_data["motors"], kappa),
@@ -107,12 +109,14 @@ def _parse_urdf_model(path: Path) -> dict[str, Any]:
             continue
         mass_node = inertial.find("mass")
         inertia_node = inertial.find("inertia")
+        origin_node = inertial.find("origin")
         if mass_node is None or inertia_node is None:
             continue
         mass_value = float(mass_node.attrib.get("value", "0"))
         total_mass += mass_value
         links[name] = {
             "mass": mass_value,
+            "com_offset": list(_parse_xyz(origin_node.attrib.get("xyz", "0 0 0"))) if origin_node is not None else [0.0, 0.0, 0.0],
             "inertia": [
                 float(inertia_node.attrib.get("ixx", "0")),
                 float(inertia_node.attrib.get("iyy", "0")),
@@ -125,6 +129,7 @@ def _parse_urdf_model(path: Path) -> dict[str, Any]:
 
     base_link_name = "base_link" if "base_link" in links else next(iter(links))
     base_inertia = links[base_link_name]["inertia"]
+    base_com_offset = [float(v) for v in links[base_link_name]["com_offset"]]
 
     motor_specs: list[dict[str, Any]] = []
     for joint in root.findall("joint"):
@@ -145,6 +150,11 @@ def _parse_urdf_model(path: Path) -> dict[str, Any]:
                 "joint_name": joint.attrib.get("name", ""),
                 "child_link": child.attrib.get("link", ""),
                 "position": [float(v) for v in xyz],
+                "position_com": [
+                    float(xyz[0] - base_com_offset[0]),
+                    float(xyz[1] - base_com_offset[1]),
+                    float(xyz[2] - base_com_offset[2]),
+                ],
                 "rotor_direction": 1 if axis_xyz[2] > 0.0 else -1,
             }
         )
@@ -153,12 +163,14 @@ def _parse_urdf_model(path: Path) -> dict[str, Any]:
         raise ValueError(f"URDF does not expose motor joint offsets under '{base_link_name}': {path}")
 
     ordered_motors = sorted(motor_specs, key=_controller_motor_order_key)
-    motor_radii = [math.hypot(motor["position"][0], motor["position"][1]) for motor in ordered_motors]
+    _validate_quadrotor_rotor_directions(ordered_motors, path)
+    motor_radii = [math.hypot(motor["position_com"][0], motor["position_com"][1]) for motor in ordered_motors]
     arm_length = float(sum(motor_radii) / len(motor_radii))
 
     return {
         "mass": float(total_mass),
         "inertia": [float(v) for v in base_inertia],
+        "base_com_offset": base_com_offset,
         "arm_length": arm_length,
         "motors": ordered_motors,
     }
@@ -171,7 +183,8 @@ def _parse_xyz(value: str) -> tuple[float, float, float]:
 
 
 def _controller_motor_order_key(motor: dict[str, Any]) -> tuple[int, float]:
-    x_pos, y_pos = float(motor["position"][0]), float(motor["position"][1])
+    position = motor.get("position_com", motor["position"])
+    x_pos, y_pos = float(position[0]), float(position[1])
     if x_pos >= 0.0 and y_pos >= 0.0:
         quadrant = 0
     elif x_pos >= 0.0 and y_pos < 0.0:
@@ -184,11 +197,26 @@ def _controller_motor_order_key(motor: dict[str, Any]) -> tuple[int, float]:
 
 
 def _build_allocation_matrix(motors: list[dict[str, Any]], kappa: float) -> list[list[float]]:
+    positions = [motor.get("position_com", motor["position"]) for motor in motors]
     return [
         [0.0 for _ in motors],
         [0.0 for _ in motors],
         [1.0 for _ in motors],
-        [float(motor["position"][1]) for motor in motors],
-        [-float(motor["position"][0]) for motor in motors],
+        [float(position[1]) for position in positions],
+        [-float(position[0]) for position in positions],
         [float(kappa) * int(motor["rotor_direction"]) for motor in motors],
     ]
+
+
+def _validate_quadrotor_rotor_directions(motors: list[dict[str, Any]], path: Path) -> None:
+    if len(motors) != 4:
+        return
+    directions = [int(motor["rotor_direction"]) for motor in motors]
+    diagonal_match = directions[0] == directions[2] and directions[1] == directions[3]
+    adjacent_opposite = directions[0] == -directions[1]
+    if diagonal_match and adjacent_opposite:
+        return
+    raise ValueError(
+        "Quadrotor URDF motor directions must follow a diagonal pairing pattern "
+        f"(got {directions} from {path})."
+    )

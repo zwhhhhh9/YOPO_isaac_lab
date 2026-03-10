@@ -21,7 +21,7 @@ import sys
 import time
 from multiprocessing import shared_memory
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -278,6 +278,193 @@ def _parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--reset_log_path", type=str, default="./yopo_drone/data/ego.csv", help="CSV path for reset stats.")
     parser.add_argument("--reset_log_count", type=int, default=26, help="Number of resets to log before stopping.")
+    parser.add_argument(
+        "--startup_hover_settle_steps",
+        type=int,
+        default=400,
+        help="Maximum number of closed-loop hover warm-up steps to run before starting telemetry and command handling.",
+    )
+    parser.add_argument(
+        "--telemetry_log_path",
+        type=str,
+        default="",
+        help="Optional CSV path for per-step hover telemetry.",
+    )
+    parser.add_argument(
+        "--disable_rotor_spin_visual",
+        action="store_true",
+        default=False,
+        help="Disable GUI-only rotor spin animation driven by controller motor speeds.",
+    )
+    parser.add_argument(
+        "--rotor_spin_visual_scale",
+        type=float,
+        default=0.12,
+        help="Visual-only multiplier applied to rotor angular speed in GUI mode.",
+    )
+    parser.add_argument(
+        "--disable_tiled_camera",
+        "--disable-tiled-camera",
+        dest="disable_tiled_camera",
+        action="store_true",
+        default=False,
+        help="Disable the tiled camera sensor used for depth preview and shared-memory export.",
+    )
+    parser.add_argument(
+        "--tiled_cam_prim_path",
+        "--tiled-cam-prim-path",
+        dest="tiled_cam_prim_path",
+        type=str,
+        default="{ENV_REGEX_NS}/Robot/base_link/TiledCamera",
+        help="USD path for the tiled camera. Supports {ENV_REGEX_NS} when attached to environment robots.",
+    )
+    parser.add_argument(
+        "--tiled_cam_width",
+        "--tiled-cam-width",
+        dest="tiled_cam_width",
+        type=int,
+        default=160,
+        help="Tiled camera width.",
+    )
+    parser.add_argument(
+        "--tiled_cam_height",
+        "--tiled-cam-height",
+        dest="tiled_cam_height",
+        type=int,
+        default=96,
+        help="Tiled camera height.",
+    )
+    parser.add_argument(
+        "--tiled_cam_update_period",
+        "--tiled-cam-update-period",
+        dest="tiled_cam_update_period",
+        type=float,
+        default=0.0,
+        help="Tiled camera update period in seconds.",
+    )
+    parser.add_argument(
+        "--tiled_cam_offset_pos",
+        "--tiled-cam-offset-pos",
+        dest="tiled_cam_offset_pos",
+        type=float,
+        nargs=3,
+        default=(0.20, 0.0, 0.0),
+        help="Camera offset position relative to the robot frame.",
+    )
+    parser.add_argument(
+        "--tiled_cam_offset_rot",
+        "--tiled-cam-offset-rot",
+        dest="tiled_cam_offset_rot",
+        type=float,
+        nargs=4,
+        default=(1.0, 0.0, 0.0, 0.0),
+        help="Camera offset rotation quaternion (w x y z).",
+    )
+    parser.add_argument(
+        "--tiled_cam_offset_convention",
+        "--tiled-cam-offset-convention",
+        dest="tiled_cam_offset_convention",
+        type=str,
+        choices=("world", "ros", "opengl"),
+        default="world",
+        help="Orientation convention used by the tiled camera offset.",
+    )
+    parser.add_argument(
+        "--tiled_cam_focal_length",
+        "--tiled-cam-focal-length",
+        dest="tiled_cam_focal_length",
+        type=float,
+        default=24.0,
+        help="Tiled camera focal length.",
+    )
+    parser.add_argument(
+        "--tiled_cam_focus_distance",
+        "--tiled-cam-focus-distance",
+        dest="tiled_cam_focus_distance",
+        type=float,
+        default=400.0,
+        help="Tiled camera focus distance.",
+    )
+    parser.add_argument(
+        "--tiled_cam_horizontal_aperture",
+        "--tiled-cam-horizontal-aperture",
+        dest="tiled_cam_horizontal_aperture",
+        type=float,
+        default=20.955,
+        help="Tiled camera horizontal aperture.",
+    )
+    parser.add_argument(
+        "--tiled_cam_clip_near",
+        "--tiled-cam-clip-near",
+        dest="tiled_cam_clip_near",
+        type=float,
+        default=0.05,
+        help="Near clipping plane for the tiled camera.",
+    )
+    parser.add_argument(
+        "--tiled_cam_clip_far",
+        "--tiled-cam-clip-far",
+        dest="tiled_cam_clip_far",
+        type=float,
+        default=200.0,
+        help="Far clipping plane for the tiled camera.",
+    )
+    parser.add_argument(
+        "--tiled_cam_warmup_steps",
+        "--tiled-cam-warmup-steps",
+        dest="tiled_cam_warmup_steps",
+        type=int,
+        default=6,
+        help="Number of render-only warmup iterations before reading tiled camera outputs.",
+    )
+    parser.add_argument(
+        "--disable_tiled_camera_inset",
+        "--disable-tiled-camera-inset",
+        dest="disable_tiled_camera_inset",
+        action="store_true",
+        default=False,
+        help="Disable the GUI inset viewport that follows the tiled camera.",
+    )
+    parser.add_argument(
+        "--tiled_cam_inset_window_name",
+        "--tiled-cam-inset-window-name",
+        dest="tiled_cam_inset_window_name",
+        type=str,
+        default="Tiled Camera",
+        help="Window title for the tiled camera GUI inset.",
+    )
+    parser.add_argument(
+        "--tiled_cam_inset_width",
+        "--tiled-cam-inset-width",
+        dest="tiled_cam_inset_width",
+        type=int,
+        default=360,
+        help="Width of the tiled camera GUI inset.",
+    )
+    parser.add_argument(
+        "--tiled_cam_inset_height",
+        "--tiled-cam-inset-height",
+        dest="tiled_cam_inset_height",
+        type=int,
+        default=240,
+        help="Height of the tiled camera GUI inset.",
+    )
+    parser.add_argument(
+        "--tiled_cam_inset_pos_x",
+        "--tiled-cam-inset-pos-x",
+        dest="tiled_cam_inset_pos_x",
+        type=int,
+        default=60,
+        help="Fallback inset X position when Render Settings window is unavailable.",
+    )
+    parser.add_argument(
+        "--tiled_cam_inset_pos_y",
+        "--tiled-cam-inset-pos-y",
+        dest="tiled_cam_inset_pos_y",
+        type=int,
+        default=120,
+        help="Fallback inset Y position when Render Settings window is unavailable.",
+    )
     parser.add_argument("--disable_env_editor_scene_init", action="store_true", default=False, help="Do not initialize the stage with drone_env_editor-style world primitives before launching the planner/control environment.")
     parser.add_argument("--env_editor_world_path", type=str, default="/World", help="USD world path used when applying drone_env_editor scene initialization.")
     parser.add_argument("--disable_env_editor_lights", action="store_true", default=False, help="Skip adding drone_env_editor dome light during stage initialization.")
@@ -293,6 +480,8 @@ def _parse_arguments() -> argparse.Namespace:
     
     AppLauncher.add_app_launcher_args(parser)
     args, hydra_args = parser.parse_known_args()
+    if not getattr(args, "disable_tiled_camera", False):
+        args.enable_cameras = True
     sys.argv = [sys.argv[0]] + hydra_args
     return args
 
@@ -379,6 +568,107 @@ def main() -> None:
         from e2e_drone import tasks
     import gymnasium as gym
 
+    def _tiled_camera_enabled() -> bool:
+        return not bool(getattr(args_cli, "disable_tiled_camera", False))
+
+    def _resolve_eval_tiled_camera_paths(unwrapped) -> tuple[str, str]:
+        prim_path = str(args_cli.tiled_cam_prim_path).strip()
+        if not prim_path:
+            raise ValueError("--tiled_cam_prim_path must not be empty.")
+
+        scene = getattr(unwrapped, "scene", None)
+        env_regex_ns = str(getattr(scene, "env_regex_ns", "") or "").rstrip("/")
+        env_prim_paths = getattr(scene, "env_prim_paths", None) or []
+        env0_prim_path = str(env_prim_paths[0]).rstrip("/") if env_prim_paths else ""
+
+        if prim_path.startswith("/World/Robot") and env_regex_ns:
+            prim_path = prim_path.replace("/World/Robot", f"{env_regex_ns}/Robot", 1)
+        elif "{ENV_REGEX_NS}" in prim_path:
+            if not env_regex_ns:
+                raise RuntimeError("Unable to resolve {ENV_REGEX_NS} for tiled camera prim path.")
+            prim_path = prim_path.replace("{ENV_REGEX_NS}", env_regex_ns)
+
+        if not prim_path.startswith("/"):
+            raise ValueError(
+                f"Resolved tiled camera prim path must be absolute, got '{prim_path}'."
+            )
+
+        view_path = prim_path
+        if env_regex_ns and env0_prim_path and env_regex_ns in view_path:
+            view_path = view_path.replace(env_regex_ns, env0_prim_path, 1)
+
+        return prim_path, view_path
+
+    def _warm_up_eval_tiled_camera(unwrapped) -> None:
+        tiled_camera = getattr(unwrapped, "_tiled_camera", None)
+        if tiled_camera is None:
+            return
+
+        if (not getattr(tiled_camera, "_is_initialized", False)) or (not hasattr(tiled_camera, "_timestamp")):
+            tiled_camera._initialize_impl()
+            tiled_camera._is_initialized = True
+            with contextlib.suppress(Exception):
+                tiled_camera.reset()
+
+        for _ in range(max(int(args_cli.tiled_cam_warmup_steps), 1)):
+            unwrapped.sim.render()
+            tiled_camera.update(0.0, force_recompute=True)
+
+        rgb = tiled_camera.data.output.get("rgb")
+        depth = tiled_camera.data.output.get("depth")
+        if depth is None:
+            depth = tiled_camera.data.output.get("distance_to_image_plane")
+        rgb_shape = tuple(rgb.shape) if rgb is not None else None
+        depth_shape = tuple(depth.shape) if depth is not None else None
+        print(f"[Info] Tiled camera data ready: rgb_shape={rgb_shape}, depth_shape={depth_shape}")
+
+    def _maybe_create_eval_tiled_camera(env) -> None:
+        unwrapped = env.unwrapped
+        unwrapped._tiled_camera = None
+        unwrapped._tiled_camera_inset_window = None
+        unwrapped._tiled_camera_view_prim_path = None
+        if not _tiled_camera_enabled():
+            return
+
+        import isaaclab.sim as sim_utils
+        from isaaclab.sensors import TiledCamera, TiledCameraCfg
+
+        try:
+            from yopo_drone.env.drone_env_editor import _add_tiled_camera, _attach_tiled_camera_inset
+        except ImportError:
+            from e2e_drone.env.drone_env_editor import _add_tiled_camera, _attach_tiled_camera_inset
+
+        sensor_prim_path, view_prim_path = _resolve_eval_tiled_camera_paths(unwrapped)
+        tiled_camera_args = argparse.Namespace(**vars(args_cli))
+        tiled_camera_args.tiled_cam_prim_path = sensor_prim_path
+
+        tiled_camera = _add_tiled_camera(
+            tiled_camera_args,
+            sim_utils=sim_utils,
+            TiledCamera=TiledCamera,
+            TiledCameraCfg=TiledCameraCfg,
+        )
+        sim_utils.update_stage()
+
+        unwrapped._tiled_camera = tiled_camera
+        unwrapped._tiled_camera_view_prim_path = view_prim_path
+
+        _warm_up_eval_tiled_camera(unwrapped)
+
+        inset_window = None
+        if not bool(getattr(args_cli, "headless", False)) and not bool(args_cli.disable_tiled_camera_inset):
+            inset_args = argparse.Namespace(**vars(args_cli))
+            inset_args.tiled_cam_prim_path = view_prim_path
+            inset_window = _attach_tiled_camera_inset(inset_args)
+        unwrapped._tiled_camera_inset_window = inset_window
+
+        print(
+            "[Info] Enabled eval tiled camera:"
+            f" sensor_prim={sensor_prim_path},"
+            f" inset_camera={view_prim_path},"
+            f" inset={'off' if inset_window is None else 'on'}"
+        )
+
     # =================================================================================
     # 定义 Bridge 类 (必须在导入 Node 之后)
     # =================================================================================
@@ -429,6 +719,7 @@ def main() -> None:
             self._last_bodyrate = np.zeros(3, dtype=np.float64)
             self._current_sim_time = 0.0
             self._last_cmd_time = 0.0
+            self._has_received_position_command = False
             self._urdf_px4_model = self._load_urdf_px4_model()
             self._kp = np.array(
                 self._resolve_vector_param(args_cli.pos_kp, LEGACY_POS_KP, "pos_kp"),
@@ -447,6 +738,7 @@ def main() -> None:
             self._flat_last_omg = np.zeros(3, dtype=np.float64)
             self._reset_pos: Optional[np.ndarray] = None
             self._reset_state: Optional[np.ndarray] = None
+            self._reset_yaw: Optional[float] = None
             self._ang_kp = np.array(
                 self._resolve_vector_param(
                     args_cli.attitude_fb_kp,
@@ -481,7 +773,19 @@ def main() -> None:
             self._reset_count = 0
             self._csv_header_written = False
             self._traj_buffers = [list() for _ in range(self._num_envs)]
+            self._telemetry_log_path = str(args_cli.telemetry_log_path).strip()
+            self._telemetry_log_file = None
+            self._telemetry_writer = None
             self._last_reset_flags = np.zeros((self._num_envs,), dtype=bool)
+            self._startup_hover_settle_steps = max(0, int(args_cli.startup_hover_settle_steps))
+            self._enable_rotor_spin_visual = (not bool(getattr(args_cli, "headless", False))) and (not args_cli.disable_rotor_spin_visual)
+            self._rotor_spin_visual_scale = max(0.0, float(args_cli.rotor_spin_visual_scale))
+            self._rotor_joint_ids: list[int] = []
+            self._rotor_joint_names: list[str] = []
+            self._rotor_joint_angles: Optional[torch.Tensor] = None
+            self._rotor_joint_zero_vel: Optional[torch.Tensor] = None
+            self._rotor_joint_directions: Optional[torch.Tensor] = None
+            self._tiled_camera_update_failed = False
 
             self._enable_rate_ctrl = False
             att_p_gain = self._resolve_vector_param(args_cli.att_p_gain, LEGACY_ATT_P_GAIN, "att_p_gain")
@@ -527,7 +831,19 @@ def main() -> None:
                     "ctrl_thrust_ratio",
                 )
             )
-            self._controller.alloc_matrix_ = self._controller.dynamics.getAllocationMatrix()
+            ctrl_alloc_matrix = None
+            urdf_allocation = self._urdf_px4_model.get("allocation_matrix")
+            if urdf_allocation is not None:
+                urdf_allocation = np.array(urdf_allocation, dtype=np.float32)
+                if urdf_allocation.ndim == 2 and urdf_allocation.shape[0] >= 6:
+                    ctrl_alloc_matrix = torch.tensor(
+                        urdf_allocation[2:6, :],
+                        device=self._device,
+                        dtype=torch.float32,
+                    ).unsqueeze(0).repeat(self._num_envs, 1, 1)
+            if ctrl_alloc_matrix is None:
+                ctrl_alloc_matrix = self._controller.dynamics.getAllocationMatrix()
+            self._controller.alloc_matrix_ = ctrl_alloc_matrix
             self._controller.alloc_matrix_pinv_ = torch.linalg.pinv(self._controller.alloc_matrix_)
             self._controller.set_accel_filter_coef(
                 self._resolve_scalar_param(args_cli.accel_filter_coef, LEGACY_ACCEL_FILTER_COEF, "accel_filter_coef")
@@ -539,7 +855,9 @@ def main() -> None:
                 self._unwrapped._sim_step_counter = 0
 
             self._cache_state()
+            self._setup_rotor_spin_visual()
             self._refresh_hold_target(self._last_state, reason="startup", apply_command=True, log_update=True)
+            self._run_startup_hover_settle()
             self._log_controller_model(ctrl_model)
             self._log_controller_tuning()
 
@@ -590,6 +908,145 @@ def main() -> None:
                 with contextlib.suppress(Exception):
                     return self._robot.find_bodies(body_name)[0]
             return 0
+
+        def _setup_rotor_spin_visual(self) -> None:
+            if not self._enable_rotor_spin_visual:
+                return
+            if self._rotor_spin_visual_scale <= 0.0:
+                self.get_logger().info("Rotor spin visualization disabled: visual scale <= 0.")
+                self._enable_rotor_spin_visual = False
+                return
+            urdf_model = self._urdf_px4_model or {}
+            motors = urdf_model.get("motors") or []
+            joint_names = [str(motor.get("joint_name", "")).strip() for motor in motors]
+            if not joint_names or any(not name for name in joint_names):
+                self.get_logger().warning("Rotor spin visualization disabled: motor joints not available from URDF model.")
+                self._enable_rotor_spin_visual = False
+                return
+            try:
+                joint_ids, resolved_joint_names = self._robot.find_joints(joint_names, preserve_order=True)
+            except Exception as exc:
+                self.get_logger().warning(f"Rotor spin visualization disabled: failed to resolve motor joints: {exc}")
+                self._enable_rotor_spin_visual = False
+                return
+            if len(resolved_joint_names) != len(joint_names):
+                self.get_logger().warning(
+                    "Rotor spin visualization disabled:"
+                    f" expected {len(joint_names)} joints, resolved {len(resolved_joint_names)}."
+                )
+                self._enable_rotor_spin_visual = False
+                return
+
+            self._rotor_joint_ids = [int(joint_id) for joint_id in joint_ids]
+            self._rotor_joint_names = [str(name) for name in resolved_joint_names]
+            self._rotor_joint_angles = torch.zeros(
+                (self._num_envs, len(self._rotor_joint_ids)),
+                device=self._device,
+                dtype=torch.float32,
+            )
+            self._rotor_joint_zero_vel = torch.zeros_like(self._rotor_joint_angles)
+            rotor_direction_by_name = {
+                str(motor.get("joint_name", "")).strip(): float(motor.get("rotor_direction", 1.0))
+                for motor in motors
+            }
+            missing_joint_names = [name for name in self._rotor_joint_names if name not in rotor_direction_by_name]
+            if missing_joint_names:
+                self.get_logger().warning(
+                    "Rotor spin visualization disabled:"
+                    f" missing rotor directions for joints: {', '.join(missing_joint_names)}."
+                )
+                self._enable_rotor_spin_visual = False
+                return
+            rotor_visual_compensation_by_name = {
+                "motor1": 1.0,
+                "motor2": -1.0,
+                "motor3": -1.0,
+                "motor4": 1.0,
+            }
+            rotor_directions = [
+                rotor_direction_by_name[name] * rotor_visual_compensation_by_name.get(name, 1.0)
+                for name in self._rotor_joint_names
+            ]
+            if len(rotor_directions) != len(self._rotor_joint_ids):
+                self.get_logger().warning(
+                    "Rotor spin visualization disabled:"
+                    f" expected {len(self._rotor_joint_ids)} rotor directions, got {len(rotor_directions)}."
+                )
+                self._enable_rotor_spin_visual = False
+                return
+            # Some prop meshes are mirrored relative to others, so apply a visual-only
+            # per-joint compensation to keep the apparent pairing as motor1/motor3
+            # forward and motor2/motor4 reverse.
+            self._rotor_joint_directions = torch.tensor(
+                [rotor_directions],
+                device=self._device,
+                dtype=torch.float32,
+            )
+            self._write_rotor_spin_visual()
+            self.get_logger().info(
+                "Enabled rotor spin visualization on joints: "
+                + ", ".join(self._rotor_joint_names)
+                + f" (visual_scale={self._rotor_spin_visual_scale:.3f})"
+            )
+
+        def _write_rotor_spin_visual(self, env_ids: Sequence[int] | slice | None = None) -> None:
+            if (
+                not self._enable_rotor_spin_visual
+                or self._rotor_joint_angles is None
+                or self._rotor_joint_zero_vel is None
+                or not self._rotor_joint_ids
+            ):
+                return
+            if env_ids is None:
+                position = self._rotor_joint_angles
+                velocity = self._rotor_joint_zero_vel
+            else:
+                position = self._rotor_joint_angles[env_ids]
+                velocity = self._rotor_joint_zero_vel[env_ids]
+            self._robot.write_joint_state_to_sim(
+                position=position,
+                velocity=velocity,
+                joint_ids=self._rotor_joint_ids,
+                env_ids=env_ids,
+            )
+
+        def _update_rotor_spin_visual(
+            self,
+            motor_speeds: Optional[torch.Tensor],
+            dt: float,
+            *,
+            force_sync: bool = False,
+        ) -> None:
+            if (
+                not self._enable_rotor_spin_visual
+                or motor_speeds is None
+                or self._rotor_joint_angles is None
+                or self._rotor_joint_directions is None
+            ):
+                return
+            num_rotors = self._rotor_joint_angles.shape[1]
+            signed_speed = (
+                motor_speeds[:, :num_rotors].detach().to(dtype=torch.float32)
+                * self._rotor_joint_directions
+                * self._rotor_spin_visual_scale
+            )
+            self._rotor_joint_angles = torch.remainder(
+                self._rotor_joint_angles + signed_speed * float(dt) + math.pi,
+                2.0 * math.pi,
+            ) - math.pi
+            if force_sync:
+                self._write_rotor_spin_visual()
+                self._unwrapped.sim.forward()
+
+        def _reset_rotor_spin_visual(self, env_ids: Sequence[int] | None = None) -> None:
+            if not self._enable_rotor_spin_visual or self._rotor_joint_angles is None:
+                return
+            if env_ids is None:
+                self._rotor_joint_angles.zero_()
+                self._write_rotor_spin_visual()
+                return
+            self._rotor_joint_angles[env_ids] = 0.0
+            self._write_rotor_spin_visual(env_ids=env_ids)
 
         def _body_index(self) -> int:
             body_id = self._body_id
@@ -781,13 +1238,22 @@ def main() -> None:
                 return
             self._reset_state = state_array.copy()
             self._reset_pos = state_array[:3].copy()
+            if state_array.size >= 7:
+                current_quat = tuple(float(v) for v in state_array[3:7])
+                _, _, self._reset_yaw = self._quaternion_to_euler_zyx(current_quat)
             self._last_state = state_array.copy()
             if apply_command:
                 self._set_hover_command()
             if log_update:
+                yaw_text = f", yaw={self._reset_yaw:.3f}" if self._reset_yaw is not None else ""
+                vel_text = ""
+                if state_array.size >= 10:
+                    vel = state_array[7:10]
+                    vel_text = f", vel=({vel[0]:.3f}, {vel[1]:.3f}, {vel[2]:.3f})"
                 self.get_logger().info(
                     f"Updated hold target from {reason}: "
                     f"({self._reset_pos[0]:.3f}, {self._reset_pos[1]:.3f}, {self._reset_pos[2]:.3f})"
+                    f"{yaw_text}{vel_text}"
                 )
 
         def _apply_timeout_hold(self) -> None:
@@ -820,8 +1286,28 @@ def main() -> None:
                     return desired_pos[self._drone_id].detach().cpu().numpy()
             return None if self._reset_pos is None else np.array(self._reset_pos, copy=True)
 
-        def _get_depth_tensor(self):
+        def _refresh_tiled_camera(self):
+            if self._tiled_camera_update_failed:
+                return None
             tiled_camera = getattr(self._unwrapped, "_tiled_camera", None)
+            if tiled_camera is None:
+                return None
+            try:
+                if (not getattr(tiled_camera, "_is_initialized", False)) or (not hasattr(tiled_camera, "_timestamp")):
+                    tiled_camera._initialize_impl()
+                    tiled_camera._is_initialized = True
+                    with contextlib.suppress(Exception):
+                        tiled_camera.reset()
+                tiled_camera.update(self._physics_dt, force_recompute=True)
+            except Exception as exc:
+                self._tiled_camera_update_failed = True
+                self.get_logger().warning(f"Tiled camera disabled after update failure: {exc}")
+                self._unwrapped._tiled_camera = None
+                return None
+            return tiled_camera
+
+        def _get_depth_tensor(self):
+            tiled_camera = self._refresh_tiled_camera()
             if tiled_camera is None:
                 return None
             depth_tensor = tiled_camera.data.output.get("depth", None)
@@ -916,6 +1402,7 @@ def main() -> None:
                     yaw,
                     yaw_dot,
                 )
+                self._has_received_position_command = True
                 self._last_cmd_time = self._current_sim_time
 
         def _send_sidecar_payload(self, payload: dict) -> None:
@@ -934,62 +1421,74 @@ def main() -> None:
                     rclpy.spin_once(self, timeout_sec=0.0)
                 if self._use_ros2_sidecar:
                     self._poll_sidecar_command()
+                # Refresh the cached state before computing the fallback hold command.
+                # This avoids using a stale startup pose on the first control step.
+                self._cache_state()
+                if (not self._has_received_position_command) or (self._current_sim_time - self._last_cmd_time > 1.0):
+                    self._apply_timeout_hold()
                 start_time = time.time()
                 self._step_env()
                 # NOTE: publishing image here will introduce significant delay
                 # if self._current_sim_time > next_step:
                 #     self._publish_depth(self._current_sim_time)
                 #     next_step = sim_time + render_interval
-                if self._current_sim_time - self._last_cmd_time > 1.0:
+                if (not self._has_received_position_command) or (self._current_sim_time - self._last_cmd_time > 1.0):
                     self._apply_timeout_hold()
                 # print(f"Simulation time: {time.time() - start_time}")
                 if self._reset_log_done:
                     break
 
+        def _run_startup_hover_settle(self) -> None:
+            if self._startup_hover_settle_steps <= 0 or self._reset_pos is None:
+                return
+            self.get_logger().info(
+                f"Running startup hover settle for {self._startup_hover_settle_steps} steps before enabling telemetry."
+            )
+            for _ in range(self._startup_hover_settle_steps):
+                self._cache_state()
+                self._set_hover_command()
+                self._run_controller_step(count_sim_step=False)
+            self._cache_state()
+            if self._last_state is not None:
+                settle_state = np.array(self._last_state, dtype=np.float32)
+                settle_pos = settle_state[:3]
+                settle_vel = settle_state[7:10] if settle_state.size >= 10 else np.zeros(3, dtype=np.float32)
+                settle_err = np.array(self._reset_pos, dtype=np.float32) - settle_pos
+                settle_speed = float(np.linalg.norm(settle_vel))
+                self.get_logger().info(
+                    "Startup hover settle complete: "
+                    f"state=({settle_pos[0]:.3f}, {settle_pos[1]:.3f}, {settle_pos[2]:.3f}), "
+                    f"err_to_start=({settle_err[0]:.3f}, {settle_err[1]:.3f}, {settle_err[2]:.3f}), "
+                    f"speed={settle_speed:.3f} m/s. "
+                    "Keeping the original startup pose as the hover target."
+                )
+                self._set_hover_command()
+            self._current_sim_time = 0.0
+            self._last_cmd_time = 0.0
+            self._unwrapped._sim_step_counter = 0
+
         def _step_env(self) -> None:
-            cmd = torch.zeros(4, dtype=self._actions.dtype, device=self._device)
-            cmd[: len(self._latest_cmd)] = torch.as_tensor(self._latest_cmd, device=self._device)[: 4]
-            self._actions.zero_()
-            self._actions[self._drone_id, : 4] = cmd
+            self._run_controller_step(count_sim_step=True)
 
-            with torch.inference_mode():
-                actions = self._actions.to(self._device)
+            self._unwrapped.episode_length_buf += 1
+            self._unwrapped.common_step_counter += 1
 
-                for i in range(self._unwrapped.cfg.decimation):
-                    cur_state = self._robot.data.root_state_w.clone()
-                    if self._enable_rate_ctrl:
-                        _, _, _, info = self._controller.compute_control(cur_state, actions, self._physics_dt, mode='rate')
-                    else:
-                        _, _, _, info = self._controller.compute_control(cur_state, actions, self._physics_dt, mode='attitude')
-                    self._ctrl_info = info
+            self._update_reset_buffers()
+            self._last_reset_flags = self._unwrapped.reset_buf.detach().cpu().numpy().astype(bool)
 
-                    motor_thrusts = info.get("motor_thrusts")
-                    if motor_thrusts is None:
-                        raise RuntimeError("PX4 controller did not return motor thrust targets.")
-                    self._robot.set_thrust_target(motor_thrusts)
+            reset_env_ids = self._unwrapped.reset_buf.nonzero(as_tuple=False).squeeze(-1)
+            if len(reset_env_ids) > 0:
+                self._unwrapped._reset_idx(reset_env_ids)
+                self._reset_rotor_spin_visual(reset_env_ids)
+                self._unwrapped.scene.write_data_to_sim()
+                self._unwrapped.sim.forward()
+                self._unwrapped.sim.render()
+                state = self._robot.data.root_state_w[self._drone_id].detach().cpu().numpy()
+                self._refresh_hold_target(state, reason="env_reset", apply_command=True, log_update=True)
+                self._controller.reset(reset_env_ids)
 
-                    self._unwrapped._sim_step_counter += 1
-                    self._unwrapped.scene.write_data_to_sim()
-                    self._unwrapped.sim.step(render=False)
-                    if self._unwrapped._sim_step_counter % 4 == 0:
-                        self._unwrapped.sim.render()
-                    self._unwrapped.scene.update(dt=self._unwrapped.physics_dt)
-
-                self._unwrapped.episode_length_buf += 1
-                self._unwrapped.common_step_counter += 1
-
-                self._update_reset_buffers()
-                self._last_reset_flags = self._unwrapped.reset_buf.detach().cpu().numpy().astype(bool)
-
-                reset_env_ids = self._unwrapped.reset_buf.nonzero(as_tuple=False).squeeze(-1)
-                if len(reset_env_ids) > 0:
-                    self._unwrapped._reset_idx(reset_env_ids)
-                    self._unwrapped.scene.write_data_to_sim()
-                    self._unwrapped.sim.forward()
-                    self._unwrapped.sim.render()
-                    state = self._robot.data.root_state_w[self._drone_id].detach().cpu().numpy()
-                    self._refresh_hold_target(state, reason="env_reset", apply_command=True, log_update=True)
-                    self._controller.reset(reset_env_ids)
+            if getattr(self._unwrapped, "_tiled_camera", None) is not None:
+                self._unwrapped.sim.render()
 
             self._cache_state()
             sim_time = float(self._unwrapped._sim_step_counter) * self._physics_dt
@@ -998,6 +1497,7 @@ def main() -> None:
             self._publish_odometry(sim_time)
             self._publish_ctrl_info(sim_time)
             self._publish_flatness(sim_time)
+            self._log_telemetry(sim_time)
             reset_flags = self._last_reset_flags
             self._record_stats(sim_time, reset_flags)
 
@@ -1028,6 +1528,45 @@ def main() -> None:
                                 "position": [float(pos[0]), float(pos[1]), float(pos[2])],
                             }
                         )
+
+        def _run_controller_step(self, *, count_sim_step: bool) -> None:
+            cmd = torch.zeros(4, dtype=self._actions.dtype, device=self._device)
+            cmd[: len(self._latest_cmd)] = torch.as_tensor(self._latest_cmd, device=self._device)[: 4]
+            self._actions.zero_()
+            self._actions[self._drone_id, : 4] = cmd
+
+            with torch.inference_mode():
+                actions = self._actions.to(self._device)
+
+                for _ in range(self._unwrapped.cfg.decimation):
+                    cur_state = self._robot.data.root_state_w.clone()
+                    if self._enable_rate_ctrl:
+                        _, _, motor_speeds, info = self._controller.compute_control(
+                            cur_state, actions, self._physics_dt, mode='rate'
+                        )
+                    else:
+                        _, _, motor_speeds, info = self._controller.compute_control(
+                            cur_state, actions, self._physics_dt, mode='attitude'
+                        )
+                    self._ctrl_info = info
+
+                    motor_thrusts = info.get("motor_thrusts")
+                    if motor_thrusts is None:
+                        raise RuntimeError("PX4 controller did not return motor thrust targets.")
+                    self._robot.set_thrust_target(motor_thrusts)
+
+                    if count_sim_step:
+                        self._unwrapped._sim_step_counter += 1
+                    self._unwrapped.scene.write_data_to_sim()
+                    self._unwrapped.sim.step(render=False)
+                    self._update_rotor_spin_visual(
+                        motor_speeds,
+                        self._physics_dt,
+                        force_sync=(self._unwrapped._sim_step_counter % 4 == 0) if count_sim_step else False,
+                    )
+                    if count_sim_step and self._unwrapped._sim_step_counter % 4 == 0:
+                        self._unwrapped.sim.render()
+                    self._unwrapped.scene.update(dt=self._unwrapped.physics_dt)
 
         def _record_stats(self, timestamp: float, reset_flags: Optional[np.ndarray]) -> None:
             if self._reset_log_done or self._reset_log_target <= 0 or self._last_states is None:
@@ -1092,6 +1631,149 @@ def main() -> None:
                     )
                     self._csv_header_written = True
                 writer.writerows(rows)
+
+        def _ensure_telemetry_writer(self) -> bool:
+            if not self._telemetry_log_path:
+                return False
+            if self._telemetry_writer is not None and self._telemetry_log_file is not None:
+                return True
+            log_path = Path(self._telemetry_log_path)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            self._telemetry_log_file = log_path.open("w", newline="")
+            self._telemetry_writer = csv.writer(self._telemetry_log_file)
+            self._telemetry_writer.writerow(
+                [
+                    "timestamp",
+                    "pos_x",
+                    "pos_y",
+                    "pos_z",
+                    "vel_x",
+                    "vel_y",
+                    "vel_z",
+                    "roll",
+                    "pitch",
+                    "yaw",
+                    "bodyrate_x",
+                    "bodyrate_y",
+                    "bodyrate_z",
+                    "target_x",
+                    "target_y",
+                    "target_z",
+                    "target_yaw",
+                    "err_x",
+                    "err_y",
+                    "err_z",
+                    "speed_xy",
+                    "speed_xyz",
+                    "latest_cmd_0",
+                    "latest_cmd_1",
+                    "latest_cmd_2",
+                    "latest_cmd_3",
+                    "flat_roll",
+                    "flat_pitch",
+                    "flat_yaw",
+                    "flat_bodyrate_x",
+                    "flat_bodyrate_y",
+                    "flat_bodyrate_z",
+                    "flat_thrust_norm",
+                    "des_roll",
+                    "des_pitch",
+                    "des_yaw",
+                    "des_bodyrate_x",
+                    "des_bodyrate_y",
+                    "des_bodyrate_z",
+                ]
+            )
+            self._telemetry_log_file.flush()
+            return True
+
+        def _log_telemetry(self, timestamp: float) -> None:
+            if self._last_state is None or not self._ensure_telemetry_writer():
+                return
+            state = self._last_state
+            pos = np.array(state[:3], dtype=np.float64)
+            vel = np.array(state[7:10], dtype=np.float64)
+            roll, pitch, yaw = self._quaternion_to_euler_zyx(tuple(float(v) for v in state[3:7]))
+            bodyrate = np.array(state[10:13], dtype=np.float64)
+
+            if self._reset_pos is None:
+                target_pos = np.full(3, np.nan, dtype=np.float64)
+            else:
+                target_pos = np.array(self._reset_pos, dtype=np.float64)
+            target_yaw = float(self._reset_yaw) if self._reset_yaw is not None else float("nan")
+            pos_err = target_pos - pos if np.all(np.isfinite(target_pos)) else np.full(3, np.nan, dtype=np.float64)
+
+            desired_euler = np.full(3, np.nan, dtype=np.float64)
+            desired_bodyrate = np.full(3, np.nan, dtype=np.float64)
+            ctrl = self._ctrl_info
+            if ctrl is not None:
+                q_des = ctrl.get("q_des")
+                if q_des is not None:
+                    if isinstance(q_des, torch.Tensor):
+                        q_des = q_des.detach().cpu().numpy()
+                    q_des = np.array(q_des)
+                    if q_des.ndim >= 2 and q_des.shape[0] > self._drone_id:
+                        desired_euler = np.array(
+                            self._quaternion_to_euler_zyx(tuple(float(v) for v in q_des[self._drone_id].tolist())),
+                            dtype=np.float64,
+                        )
+                rate_sp = ctrl.get("rate_sp")
+                if rate_sp is not None:
+                    if isinstance(rate_sp, torch.Tensor):
+                        rate_sp = rate_sp.detach().cpu().numpy()
+                    rate_sp = np.array(rate_sp)
+                    if rate_sp.ndim >= 2 and rate_sp.shape[0] > self._drone_id:
+                        desired_bodyrate = np.array(rate_sp[self._drone_id], dtype=np.float64)
+
+            flat_att = np.array(self._last_flatness_debug["attitude"], dtype=np.float64)
+            flat_bodyrate = np.array(self._last_flatness_debug["bodyrate"], dtype=np.float64)
+            flat_thrust_norm = float(self._last_flatness_debug["thrust_norm"])
+            latest_cmd = np.array(self._latest_cmd[:4], dtype=np.float64)
+
+            self._telemetry_writer.writerow(
+                [
+                    float(timestamp),
+                    float(pos[0]),
+                    float(pos[1]),
+                    float(pos[2]),
+                    float(vel[0]),
+                    float(vel[1]),
+                    float(vel[2]),
+                    float(roll),
+                    float(pitch),
+                    float(yaw),
+                    float(bodyrate[0]),
+                    float(bodyrate[1]),
+                    float(bodyrate[2]),
+                    float(target_pos[0]),
+                    float(target_pos[1]),
+                    float(target_pos[2]),
+                    float(target_yaw),
+                    float(pos_err[0]),
+                    float(pos_err[1]),
+                    float(pos_err[2]),
+                    float(np.linalg.norm(vel[:2])),
+                    float(np.linalg.norm(vel)),
+                    float(latest_cmd[0]),
+                    float(latest_cmd[1]),
+                    float(latest_cmd[2]),
+                    float(latest_cmd[3]),
+                    float(flat_att[0]),
+                    float(flat_att[1]),
+                    float(flat_att[2]),
+                    float(flat_bodyrate[0]),
+                    float(flat_bodyrate[1]),
+                    float(flat_bodyrate[2]),
+                    flat_thrust_norm,
+                    float(desired_euler[0]),
+                    float(desired_euler[1]),
+                    float(desired_euler[2]),
+                    float(desired_bodyrate[0]),
+                    float(desired_bodyrate[1]),
+                    float(desired_bodyrate[2]),
+                ]
+            )
+            self._telemetry_log_file.flush()
 
         def _cache_state(self) -> None:
             states = self._robot.data.root_state_w.detach().cpu().numpy().copy()
@@ -1238,6 +1920,7 @@ def main() -> None:
             yaw = float(msg.yaw)
             yaw_dot = float(msg.yaw_dot)
             self._apply_position_command(pos, vel, acc, jerk, yaw, yaw_dot)
+            self._has_received_position_command = True
             self._last_cmd_time = self._current_sim_time
 
         def _apply_position_command(
@@ -1331,14 +2014,13 @@ def main() -> None:
         def _set_hover_command(self) -> None:
             if self._last_state is None or self._reset_pos is None:
                 return
-            current_quat = np.array(self._last_state[3:7], dtype=np.float64)
-            _, _, yaw = self._quaternion_to_euler_zyx(tuple(current_quat.tolist()))
+            yaw = float(self._reset_yaw) if self._reset_yaw is not None else 0.0
             self._apply_position_command(
                 np.array(self._reset_pos, dtype=np.float32),
                 np.zeros(3, dtype=np.float32),
                 np.zeros(3, dtype=np.float32),
                 np.zeros(3, dtype=np.float32),
-                float(yaw),
+                yaw,
                 0.0,
             )
 
@@ -1361,6 +2043,19 @@ def main() -> None:
             return fb
 
         def close(self) -> None:
+            if self._telemetry_log_file is not None:
+                self._telemetry_log_file.close()
+                self._telemetry_log_file = None
+                self._telemetry_writer = None
+            inset_window = getattr(self._unwrapped, "_tiled_camera_inset_window", None)
+            if inset_window is not None:
+                with contextlib.suppress(Exception):
+                    inset_window.destroy()
+                self._unwrapped._tiled_camera_inset_window = None
+            if hasattr(self._unwrapped, "_tiled_camera"):
+                self._unwrapped._tiled_camera = None
+            if hasattr(self._unwrapped, "_tiled_camera_view_prim_path"):
+                self._unwrapped._tiled_camera_view_prim_path = None
             if self._depth_shm_writer is not None:
                 self._depth_shm_writer.close()
             if self._udp_cmd_socket is not None:
@@ -1576,10 +2271,12 @@ def main() -> None:
             if isinstance(pose_range, dict):
                 z_range = pose_range.get("z")
                 if z_range is not None and len(z_range) >= 2:
-                    safe_z = (max(float(z_range[0]), 0.75), max(float(z_range[1]), 1.25))
-                    if safe_z != tuple(float(v) for v in z_range):
-                        pose_range["z"] = safe_z
-                        adjustments.append(f"reset_z={safe_z}")
+                    current_z = tuple(float(v) for v in z_range)
+                    if not math.isclose(current_z[0], current_z[1], abs_tol=1e-8):
+                        safe_z = (max(current_z[0], 0.75), max(current_z[1], 1.25))
+                        if safe_z != current_z:
+                            pose_range["z"] = safe_z
+                            adjustments.append(f"reset_z={safe_z}")
 
                 max_tilt = math.radians(10.0)
                 for axis_name in ("roll", "pitch"):
@@ -1655,6 +2352,7 @@ def main() -> None:
         if isinstance(env.unwrapped, DirectMARLEnv):
             env = multi_agent_to_single_agent(env)
         env.reset()
+        _maybe_create_eval_tiled_camera(env)
 
         bridge: Optional[EnvRosBridge] = None
         rclpy_inited = False

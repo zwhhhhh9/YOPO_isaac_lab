@@ -1,116 +1,154 @@
 # YOPO Isaac Lab
 
-Docker-based workspace for running Isaac Lab, the YOPO environment editor, and ROS 2 connected drone evaluation scripts.
+Docker-based workspace for Isaac Lab, the YOPO drone scene editor, and the PX4-style hover / evaluation pipeline.
+
+## What This Repository Contains
+
+- Isaac Lab source checkout and Docker environment
+- YOPO drone environment editor and evaluation entry points
+- A URDF-driven drone model plus matching PX4 controller parameters
+- A ROS 2 workspace for custom messages such as `quadrotor_msgs/PositionCommand`
+
+## Key Entry Points
+
+| Path | Purpose |
+| --- | --- |
+| `scripts/init.sh` | Initialize or refresh the local Isaac Lab source tree |
+| `scripts/start.sh` | Main launcher for GUI, env editor, eval scripts, and ROS 2 nodes |
+| `yopo_drone/env/drone_env_editor.py` | Scene editor / stage construction entry |
+| `yopo_drone/tasks/editor_scene_eval_ego.py` | Preferred hover-eval entry with editor-style stage initialization |
+| `yopo_drone/utils/eval_ego.py` | Core PX4-style controller / telemetry / ROS bridge runner |
+| `yopo_drone/tasks/hover_initial_position.py` | Optional ROS 2 node that captures odometry and republishes a hover target |
+| `assets/robot./robot.urdf` | Drone URDF used by the runtime |
+| `assets/robot./px4_params.json` | PX4 controller parameters matched to the URDF model |
 
 ## Repository Layout
 
 ```text
-scripts/                     # Entry scripts (init, start)
-env_tools/docker/isaaclab/   # Dockerfile, compose, Isaac Lab source checkout
-yopo_drone/                  # YOPO runtime, env editor, eval controller, ROS2 bridge helpers
-ros2_ws/                     # ROS 2 workspace for custom messages (quadrotor_msgs)
-assets/                      # Robot and scene assets
-logs/                        # Runtime logs mounted from container
+scripts/                     Launcher scripts
+env_tools/docker/isaaclab/   Docker setup and Isaac Lab checkout
+yopo_drone/                  Editor, eval, controller, ROS bridge helpers
+ros2_ws/                     ROS 2 workspace for custom message packages
+assets/                      Robot and scene assets
+logs/                        Host-side runtime logs
 ```
 
-## Prerequisites
+## Requirements
 
-- Linux with NVIDIA GPU and working NVIDIA drivers
-- Docker + Docker Compose plugin
+- Linux with an NVIDIA GPU and working NVIDIA drivers
+- Docker with the Docker Compose plugin
 - X11 desktop session for GUI runs (`DISPLAY` must be available)
+- Network access for the first `init.sh` or image rebuild when needed
 
-## Quick Start
+## Setup
 
-### 1) Initialize the workspace
-
-This prepares the local Isaac Lab source tree under `env_tools/docker/isaaclab/IsaacLab`.
+### 1. Initialize Isaac Lab
 
 ```bash
 cd YOPO_isaac_lab
 ./scripts/init.sh
 ```
 
-### 2) Rebuild the image after ROS 2 changes
+### 2. Build or rebuild the Docker image
 
-The container now installs ROS 2 Jazzy and builds `ros2_ws` on demand when you launch ROS nodes.
+Run this after Dockerfile changes, ROS 2 workspace changes, or whenever dependencies inside the image changed.
 
 ```bash
 docker compose -f env_tools/docker/isaaclab/docker-compose.yml build yopo
 ```
 
-### 3) Test Isaac Lab GUI startup
-
-This launches Isaac Lab GUI directly in the container.
+### 3. Smoke-test the base Isaac Lab GUI
 
 ```bash
 ./scripts/start.sh --gui
 ```
 
-### 4) Test the env editor Python program
+## Common Workflows
 
-The env editor entry script is `yopo_drone/env/drone_env_editor.py`.
+### Open the YOPO env editor
 
-Run in GUI mode:
+GUI mode:
 
 ```bash
 ./scripts/start.sh --env_editor
 ```
 
-Run headless smoke test (build scene and exit):
+Headless build-and-exit smoke test:
 
 ```bash
 ./scripts/start.sh --env_editor --headless --close-after-build
 ```
 
-Show env editor arguments/help:
+Show env editor arguments:
 
 ```bash
 ./scripts/start.sh --env_editor --help
 ```
 
-## ROS 2 Hover Workflow
+### Run the drone hover / evaluation scene
 
-### 1) Start `eval_ego.py`
+This is the recommended entry point for drone hover checks. It first initializes the stage with the same helpers used by `drone_env_editor.py`, then launches `eval_ego.py`.
 
-`eval_ego.py` now does two things:
-- Runs the PX4 controller inside Isaac Lab
-- When direct `rclpy` is unavailable in Isaac Python, automatically starts a ROS 2 sidecar bridge with system Python
+GUI mode:
 
-Run it headless:
+```bash
+./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py --num_envs 1
+```
+
+Headless mode:
+
+```bash
+./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py --headless --num_envs 1
+```
+
+Headless mode with telemetry export:
+
+```bash
+./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py \
+  --headless \
+  --num_envs 1 \
+  --telemetry_log_path yopo_drone/data/hover.csv
+```
+
+### Run `eval_ego.py` directly
+
+Use this only when you specifically want the raw eval runner without the editor-style scene wrapper.
 
 ```bash
 ./scripts/start.sh yopo_drone/utils/eval_ego.py --headless --num_envs 1
 ```
 
-If you want the planner/PX4 stack to first initialize the stage with the same world primitives as `drone_env_editor.py` (for example, to keep the ground plane visible), use the task wrapper:
+### Start the optional ROS 2 hover command node
 
-```bash
-./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py --headless --num_envs 1 --reset_log_count 0
-```
-
-### 2) Start the hover command node
-
-In another terminal, launch the ROS 2 node with system Python inside the same image:
+`eval_ego.py` can already hold position internally when no planner commands arrive. This node is only needed if you want an external ROS 2 `PositionCommand` publisher that captures the current odometry pose and keeps sending it.
 
 ```bash
 ./scripts/start.sh --ros2-node yopo_drone/tasks/hover_initial_position.py
 ```
 
-This node listens to `/drone_0_odometry`, captures the current initial pose, and keeps publishing it to `/drone_0_planning/pos_cmd` so the PX4 controller can hold position.
-
-### 3) ROS 2 transport summary
-
-- `eval_ego.py` publishes depth through shared memory and odometry/reset/goal through a sidecar ROS 2 bridge
-- `hover_initial_position.py` is a normal ROS 2 node using `quadrotor_msgs/PositionCommand`
-- `scripts/start.sh --ros2-node ...` uses system `/usr/bin/python3` with sourced ROS 2 environment
-
-## Useful Commands
-
-Stop all running YOPO Isaac Lab containers:
+Useful variants:
 
 ```bash
-./scripts/start.sh --stop-all
+./scripts/start.sh --ros2-node yopo_drone/tasks/hover_initial_position.py --yaw-mode zero
+./scripts/start.sh --ros2-node yopo_drone/tasks/hover_initial_position.py --z-offset 0.2
 ```
+
+## Control Model and Asset Mapping
+
+- `assets/robot./robot.urdf` is the drone model used by the editor and evaluation runtime.
+- `assets/robot./px4_params.json` stores the PX4-style controller tuning matched to that URDF.
+- `yopo_drone/utils/eval_ego.py` loads the URDF-derived rigid-body parameters, applies the PX4 tuning, and runs the controller.
+- `yopo_drone/utils/px4_controller.py` contains the PX4-style attitude / rate control implementation.
+
+If you change the drone geometry, mass properties, or rotor layout, update the URDF and then re-check the matching controller parameters in `assets/robot./px4_params.json`.
+
+## ROS 2 Notes
+
+- `scripts/start.sh --ros2-node ...` uses system `/usr/bin/python3` inside the container with ROS 2 sourced.
+- When direct `rclpy` import is unavailable inside Isaac Python, `eval_ego.py` automatically starts a ROS 2 UDP sidecar bridge.
+- The custom message package source of truth is `ros2_ws/src/quadrotor_msgs`.
+
+## Useful Commands
 
 Show launcher help:
 
@@ -118,9 +156,16 @@ Show launcher help:
 ./scripts/start.sh --help
 ```
 
-## Notes
+Stop all running YOPO Isaac Lab containers:
 
-- `scripts/start.sh` auto-creates required Docker volumes and normalizes `ros2_ws/{build,install,log}` ownership back to the host user.
-- On exit, the launched compose project is automatically cleaned up.
-- If GUI does not appear, verify X11 access and `DISPLAY` on host.
-- `ros2_ws/src/quadrotor_msgs` is the single source of truth for the custom ROS 2 message package.
+```bash
+./scripts/start.sh --stop-all
+```
+
+## Runtime Notes
+
+- `scripts/start.sh` creates a fresh disposable Docker Compose project for each run.
+- On exit, that Compose project is cleaned up automatically.
+- The launcher auto-creates shared Docker volumes used by Isaac Sim caches and logs.
+- `ros2_ws/build`, `ros2_ws/install`, and `ros2_ws/log` are built on demand and ownership is normalized back to the host user.
+- If a GUI window does not appear, first check `DISPLAY`, X11 permissions, and host-side `xhost` access.
