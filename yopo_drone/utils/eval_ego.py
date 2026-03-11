@@ -97,6 +97,7 @@ from yopo_drone.utils.robot_model import (
     DEFAULT_ROBOT_URDF,
     load_px4_robot_model,
 )
+from yopo_drone.utils.quintic_trajectory import QuinticTrajectory
 
 
 LEGACY_CTRL_MASS = 0.5
@@ -354,6 +355,60 @@ def _parse_arguments() -> argparse.Namespace:
         type=float,
         default=0.25,
         help="Lookahead horizon in seconds used to build the internal speed-limited target-goal reference.",
+    )
+    parser.add_argument(
+        "--quintic_goal",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar=("X", "Y", "Z"),
+        help="Internal quintic-goal mission final position in world coordinates.",
+    )
+    parser.add_argument(
+        "--quintic_goal_vel",
+        type=float,
+        nargs=3,
+        default=(0.0, 0.0, 0.0),
+        metavar=("VX", "VY", "VZ"),
+        help="Terminal velocity used by the internal quintic-goal trajectory.",
+    )
+    parser.add_argument(
+        "--quintic_goal_acc",
+        type=float,
+        nargs=3,
+        default=(0.0, 0.0, 0.0),
+        metavar=("AX", "AY", "AZ"),
+        help="Terminal acceleration used by the internal quintic-goal trajectory.",
+    )
+    parser.add_argument(
+        "--quintic_duration",
+        type=float,
+        default=5.0,
+        help="Duration in seconds for the internal quintic-goal trajectory.",
+    )
+    parser.add_argument(
+        "--quintic_initial_hover_s",
+        type=float,
+        default=0.0,
+        help="Seconds to hover at the startup position before beginning --quintic_goal.",
+    )
+    parser.add_argument(
+        "--quintic_yaw_mode",
+        choices=("adaptive", "initial", "zero", "fixed"),
+        default="adaptive",
+        help="Yaw generation mode for the internal quintic-goal trajectory.",
+    )
+    parser.add_argument(
+        "--quintic_fixed_yaw",
+        type=float,
+        default=0.0,
+        help="Yaw used when --quintic_yaw_mode=fixed.",
+    )
+    parser.add_argument(
+        "--quintic_max_yaw_rate",
+        type=float,
+        default=0.5,
+        help="Adaptive yaw-rate factor used by the internal quintic-goal trajectory.",
     )
     parser.add_argument(
         "--telemetry_log_path",
@@ -789,11 +844,14 @@ def main() -> None:
             self._last_depth: Optional[np.ndarray] = None
             self._last_state: Optional[np.ndarray] = None
             self._last_states: Optional[np.ndarray] = None
+            self._latest_reference_pos: Optional[np.ndarray] = None
+            self._latest_reference_yaw: Optional[float] = None
             self._last_att_quat = (1.0, 0.0, 0.0, 0.0)
             self._last_bodyrate = np.zeros(3, dtype=np.float64)
             self._current_sim_time = 0.0
             self._last_cmd_time = 0.0
             self._has_received_position_command = False
+            self._position_cmd_rx_count = 0
             self._urdf_px4_model = self._load_urdf_px4_model()
             self._kp = np.array(
                 self._resolve_vector_param(args_cli.pos_kp, LEGACY_POS_KP, "pos_kp"),
@@ -869,6 +927,24 @@ def main() -> None:
             self._auto_target_goal_phase = "idle"
             self._auto_target_goal_reached = False
             self._auto_target_goal_speed_cmd = 0.0
+            self._quintic_goal = (
+                np.array(args_cli.quintic_goal, dtype=np.float32).reshape(3)
+                if args_cli.quintic_goal is not None
+                else None
+            )
+            self._quintic_goal_vel = np.array(args_cli.quintic_goal_vel, dtype=np.float32).reshape(3)
+            self._quintic_goal_acc = np.array(args_cli.quintic_goal_acc, dtype=np.float32).reshape(3)
+            self._quintic_duration = max(1e-3, float(args_cli.quintic_duration))
+            self._quintic_initial_hover_s = max(0.0, float(args_cli.quintic_initial_hover_s))
+            self._quintic_yaw_mode = str(args_cli.quintic_yaw_mode)
+            self._quintic_fixed_yaw = float(args_cli.quintic_fixed_yaw)
+            self._quintic_max_yaw_rate = float(args_cli.quintic_max_yaw_rate)
+            self._quintic_start_time = 0.0
+            self._quintic_phase = "idle"
+            self._quintic_trajectory: Optional[QuinticTrajectory] = None
+            self._quintic_last_sample_time = 0.0
+            self._quintic_last_yaw = 0.0
+            self._quintic_terminal_logged = False
             self._enable_rotor_spin_visual = (not bool(getattr(args_cli, "headless", False))) and (not args_cli.disable_rotor_spin_visual)
             self._rotor_spin_visual_scale = max(0.0, float(args_cli.rotor_spin_visual_scale))
             self._rotor_joint_ids: list[int] = []
@@ -952,7 +1028,9 @@ def main() -> None:
             self._log_controller_model(ctrl_model)
             self._log_controller_tuning()
             self._log_auto_target_goal_plan()
+            self._log_quintic_goal_plan()
             self._restart_auto_target_goal_task(reason="startup")
+            self._restart_quintic_goal_task(reason="startup")
 
             if self._ros_enabled:
                 self._depth_pub = self.create_publisher(Image, depth_topic, 10)
@@ -1329,6 +1407,25 @@ def main() -> None:
                 f"settle_speed={self._auto_target_goal_settle_speed:.3f} m/s."
             )
 
+        def _log_quintic_goal_plan(self) -> None:
+            if self._quintic_goal is None:
+                return
+            goal = self._quintic_goal
+            self.get_logger().info(
+                "Configured internal quintic-goal task: "
+                f"goal=({goal[0]:.3f}, {goal[1]:.3f}, {goal[2]:.3f}), "
+                f"goal_vel={self._quintic_goal_vel.tolist()}, "
+                f"goal_acc={self._quintic_goal_acc.tolist()}, "
+                f"startup_hover={self._quintic_initial_hover_s:.2f}s, "
+                f"duration={self._quintic_duration:.2f}s, "
+                f"yaw_mode={self._quintic_yaw_mode}."
+            )
+            if self._auto_target_goal is not None:
+                self.get_logger().warning(
+                    "Both --auto_target_goal and --quintic_goal were provided. "
+                    "The internal quintic-goal task will take priority."
+                )
+
         def _restart_auto_target_goal_task(self, *, reason: str) -> None:
             if self._auto_target_goal is None:
                 return
@@ -1341,6 +1438,22 @@ def main() -> None:
                     "Restarted internal target-goal task "
                     f"after {reason}: goal=({self._auto_target_goal[0]:.3f}, "
                     f"{self._auto_target_goal[1]:.3f}, {self._auto_target_goal[2]:.3f})."
+                )
+
+        def _restart_quintic_goal_task(self, *, reason: str) -> None:
+            if self._quintic_goal is None:
+                return
+            self._quintic_start_time = float(self._current_sim_time)
+            self._quintic_phase = "idle"
+            self._quintic_trajectory = None
+            self._quintic_last_sample_time = float(self._current_sim_time)
+            self._quintic_last_yaw = float(self._reset_yaw) if self._reset_yaw is not None else 0.0
+            self._quintic_terminal_logged = False
+            if reason != "startup":
+                self.get_logger().info(
+                    "Restarted internal quintic-goal task "
+                    f"after {reason}: goal=({self._quintic_goal[0]:.3f}, "
+                    f"{self._quintic_goal[1]:.3f}, {self._quintic_goal[2]:.3f})."
                 )
 
         def _refresh_hold_target(
@@ -1377,18 +1490,106 @@ def main() -> None:
                 )
 
         def _apply_timeout_hold(self) -> None:
-            # Keep the originally captured hold target when planner commands stop.
-            # If the target is repeatedly refreshed to the current pose, any slow
-            # descent becomes the new reference and the vehicle will settle to ground.
+            # Hold the last commanded reference when external planning stops.
+            # This preserves the quintic terminal target instead of snapping back
+            # to the startup hover point after a command timeout.
+            if self._latest_reference_pos is not None:
+                yaw = (
+                    float(self._latest_reference_yaw)
+                    if self._latest_reference_yaw is not None
+                    else (float(self._reset_yaw) if self._reset_yaw is not None else 0.0)
+                )
+                self._apply_position_command(
+                    np.array(self._latest_reference_pos, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    yaw,
+                    0.0,
+                )
+                return
+            # Keep the originally captured hover target only as the final fallback.
             if self._reset_pos is None:
                 self._refresh_hold_target(self._last_state, reason="command_timeout_init", apply_command=True)
                 return
             self._set_hover_command()
 
         def _apply_default_command(self) -> None:
+            if self._apply_quintic_goal_command():
+                return
             if self._apply_auto_target_goal_command():
                 return
             self._apply_timeout_hold()
+
+        def _apply_quintic_goal_command(self) -> bool:
+            if self._quintic_goal is None or self._last_state is None or self._reset_pos is None:
+                return False
+
+            mission_time = max(0.0, float(self._current_sim_time) - float(self._quintic_start_time))
+            yaw = float(self._reset_yaw) if self._reset_yaw is not None else 0.0
+            if mission_time < self._quintic_initial_hover_s:
+                if self._quintic_phase != "startup_hover":
+                    self._quintic_phase = "startup_hover"
+                    self.get_logger().info(
+                        "Internal quintic-goal task: "
+                        f"holding startup position for {self._quintic_initial_hover_s:.2f}s "
+                        f"before planning to ({self._quintic_goal[0]:.3f}, "
+                        f"{self._quintic_goal[1]:.3f}, {self._quintic_goal[2]:.3f})."
+                    )
+                self._apply_position_command(
+                    np.array(self._reset_pos, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    yaw,
+                    0.0,
+                )
+                return True
+
+            if self._quintic_trajectory is None:
+                start_state = np.array(self._last_state, dtype=np.float32)
+                start_pos = start_state[:3]
+                start_vel = start_state[7:10] if start_state.size >= 10 else np.zeros(3, dtype=np.float32)
+                initial_yaw = float(self._reset_yaw) if self._reset_yaw is not None else 0.0
+                self._quintic_trajectory = QuinticTrajectory(
+                    start_pos=np.array(start_pos, dtype=np.float64),
+                    start_vel=np.array(start_vel, dtype=np.float64),
+                    start_acc=np.zeros(3, dtype=np.float64),
+                    goal_pos=np.array(self._quintic_goal, dtype=np.float64),
+                    goal_vel=np.array(self._quintic_goal_vel, dtype=np.float64),
+                    goal_acc=np.array(self._quintic_goal_acc, dtype=np.float64),
+                    duration=self._quintic_duration,
+                    yaw_mode=self._quintic_yaw_mode,
+                    initial_yaw=initial_yaw,
+                    fixed_yaw=self._quintic_fixed_yaw,
+                    max_yaw_rate=self._quintic_max_yaw_rate,
+                )
+                self._quintic_last_yaw = (
+                    self._quintic_fixed_yaw if self._quintic_yaw_mode == "fixed" else initial_yaw
+                )
+                self._quintic_last_sample_time = float(self._current_sim_time)
+                self._quintic_phase = "cruise"
+                self.get_logger().info(
+                    "Internal quintic-goal task: "
+                    f"planned from ({start_pos[0]:.3f}, {start_pos[1]:.3f}, {start_pos[2]:.3f}) "
+                    f"to ({self._quintic_goal[0]:.3f}, {self._quintic_goal[1]:.3f}, {self._quintic_goal[2]:.3f}) "
+                    f"over {self._quintic_duration:.2f}s."
+                )
+
+            elapsed = max(0.0, mission_time - self._quintic_initial_hover_s)
+            dt = max(float(self._current_sim_time) - float(self._quintic_last_sample_time), self._physics_dt, 1e-3)
+            sample = self._quintic_trajectory.sample(elapsed, last_yaw=self._quintic_last_yaw, dt=dt)
+            pos_des, vel_des, acc_des, jerk_des, yaw_des, yaw_rate_des = sample.as_eval_inputs()
+            self._apply_position_command(pos_des, vel_des, acc_des, jerk_des, yaw_des, yaw_rate_des)
+            self._quintic_last_yaw = float(sample.yaw)
+            self._quintic_last_sample_time = float(self._current_sim_time)
+            if elapsed >= self._quintic_duration and not self._quintic_terminal_logged:
+                self._quintic_terminal_logged = True
+                self._quintic_phase = "goal_hold"
+                self.get_logger().info(
+                    "Internal quintic-goal task: reached terminal sample and is holding the final state."
+                )
+            return True
 
         def _apply_auto_target_goal_command(self) -> bool:
             if self._auto_target_goal is None or self._last_state is None or self._reset_pos is None:
@@ -1627,6 +1828,7 @@ def main() -> None:
                 acc = np.array(payload.get("acceleration", [0.0, 0.0, 0.0]), dtype=np.float32)
                 yaw = float(payload.get("yaw", 0.0))
                 yaw_dot = float(payload.get("yaw_dot", 0.0))
+                self._log_received_position_command("udp_sidecar", pos, vel, acc, yaw, yaw_dot)
                 self._apply_position_command(
                     pos,
                     vel,
@@ -1694,9 +1896,9 @@ def main() -> None:
                     f"err_to_start=({settle_err[0]:.3f}, {settle_err[1]:.3f}, {settle_err[2]:.3f}), "
                     f"speed={settle_speed:.3f} m/s."
                 )
-                if self._auto_target_goal is not None:
+                if self._auto_target_goal is not None or self._quintic_goal is not None:
                     # Use the stabilized pose as the mission start hover point so
-                    # target-goal runs do not begin with a visible altitude sag.
+                    # internally generated missions do not begin with a visible altitude sag.
                     self._refresh_hold_target(
                         settle_state,
                         reason="startup_settle",
@@ -1727,6 +1929,7 @@ def main() -> None:
                 state = self._robot.data.root_state_w[self._drone_id].detach().cpu().numpy()
                 self._refresh_hold_target(state, reason="env_reset", apply_command=True, log_update=True)
                 self._restart_auto_target_goal_task(reason="env_reset")
+                self._restart_quintic_goal_task(reason="env_reset")
                 self._controller.reset(reset_env_ids)
 
             if getattr(self._unwrapped, "_tiled_camera", None) is not None:
@@ -1939,12 +2142,18 @@ def main() -> None:
             roll, pitch, yaw = self._quaternion_to_euler_zyx(tuple(float(v) for v in state[3:7]))
             bodyrate = np.array(state[10:13], dtype=np.float64)
 
-            published_goal = self._goal_position_for_publish()
-            if published_goal is None:
-                target_pos = np.full(3, np.nan, dtype=np.float64)
+            if self._latest_reference_pos is not None:
+                target_pos = np.array(self._latest_reference_pos, dtype=np.float64)
             else:
-                target_pos = np.array(published_goal, dtype=np.float64)
-            target_yaw = float(self._reset_yaw) if self._reset_yaw is not None else float("nan")
+                published_goal = self._goal_position_for_publish()
+                if published_goal is None:
+                    target_pos = np.full(3, np.nan, dtype=np.float64)
+                else:
+                    target_pos = np.array(published_goal, dtype=np.float64)
+            if self._latest_reference_yaw is not None:
+                target_yaw = float(self._latest_reference_yaw)
+            else:
+                target_yaw = float(self._reset_yaw) if self._reset_yaw is not None else float("nan")
             pos_err = target_pos - pos if np.all(np.isfinite(target_pos)) else np.full(3, np.nan, dtype=np.float64)
 
             desired_euler = np.full(3, np.nan, dtype=np.float64)
@@ -2163,6 +2372,7 @@ def main() -> None:
             jerk = np.array([msg.jerk.x, msg.jerk.y, msg.jerk.z], dtype=np.float32) if hasattr(msg, "jerk") else np.zeros(3, dtype=np.float32)
             yaw = float(msg.yaw)
             yaw_dot = float(msg.yaw_dot)
+            self._log_received_position_command("ros2", pos, vel, acc, yaw, yaw_dot)
             self._apply_position_command(pos, vel, acc, jerk, yaw, yaw_dot)
             self._has_received_position_command = True
             self._last_cmd_time = self._current_sim_time
@@ -2176,6 +2386,8 @@ def main() -> None:
             yaw_des: float,
             yaw_rate_des: float,
         ) -> None:
+            self._latest_reference_pos = np.array(pos_des, dtype=np.float32).copy()
+            self._latest_reference_yaw = float(yaw_des)
             if self._last_state is None:
                 return
             pos = self._last_state[:3]
@@ -2254,6 +2466,25 @@ def main() -> None:
                 "bodyrate": [float(bodyrate[0]), float(bodyrate[1]), float(bodyrate[2])],
                 "thrust_norm": float(thrust_norm),
             }
+
+        def _log_received_position_command(
+            self,
+            source: str,
+            pos: np.ndarray,
+            vel: np.ndarray,
+            acc: np.ndarray,
+            yaw: float,
+            yaw_dot: float,
+        ) -> None:
+            self._position_cmd_rx_count += 1
+            if self._position_cmd_rx_count <= 3 or self._position_cmd_rx_count % 200 == 0:
+                self.get_logger().info(
+                    f"Received {source} position command #{self._position_cmd_rx_count}: "
+                    f"pos=({pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}), "
+                    f"vel=({vel[0]:.3f}, {vel[1]:.3f}, {vel[2]:.3f}), "
+                    f"acc=({acc[0]:.3f}, {acc[1]:.3f}, {acc[2]:.3f}), "
+                    f"yaw={yaw:.3f}, yaw_dot={yaw_dot:.3f}"
+                )
 
         def _set_hover_command(self) -> None:
             if self._last_state is None or self._reset_pos is None:

@@ -94,12 +94,12 @@ services:
     image: yopo-isaaclab-base
     environment: *default-isaac-lab-environment
     volumes: *default-isaac-lab-volumes
+    runtime: nvidia
     privileged: true
     cap_add:
       - SYS_RAWIO
       - SYS_ADMIN
     network_mode: host
-    deploy: *default-isaac-lab-deploy
     entrypoint: ${ENTRYPOINT:-bash}
     stdin_open: true
     tty: true
