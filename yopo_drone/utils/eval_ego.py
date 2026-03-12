@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+from dataclasses import dataclass
 import json
 import math
 import os
@@ -60,6 +61,102 @@ def _normalize_csv_log_path(path_str: str, *, default_filename: str | None = Non
 
 def _default_hover_telemetry_filename() -> str:
     return f"hover_{_RUN_LOG_TIMESTAMP}.csv"
+
+
+@dataclass
+class FigureEightReferenceState:
+    position: np.ndarray
+    velocity: np.ndarray
+    acceleration: np.ndarray
+    yaw: float
+    yaw_dot: float
+
+
+class FigureEightReference:
+    """Arc-length-parameterized Gerono lemniscate with approximately constant speed."""
+
+    def __init__(self, *, length: float, width: float, speed: float, sample_count: int = 4001) -> None:
+        self.length = float(length)
+        self.width = float(width)
+        self.speed = float(speed)
+        if self.length <= 0.0:
+            raise ValueError("Figure-eight length must be > 0.")
+        if self.width <= 0.0:
+            raise ValueError("Figure-eight width must be > 0.")
+        if self.speed <= 0.0:
+            raise ValueError("Figure-eight speed must be > 0.")
+
+        self._half_length = 0.5 * self.length
+        self._half_width = 0.5 * self.width
+        self._theta_samples = np.linspace(0.0, 2.0 * math.pi, max(int(sample_count), 64), dtype=np.float64)
+        deriv = self._curve_first_derivative(self._theta_samples)
+        deriv_speed = np.linalg.norm(deriv, axis=-1)
+        delta_theta = np.diff(self._theta_samples)
+        cumulative = np.zeros_like(self._theta_samples)
+        cumulative[1:] = np.cumsum(0.5 * (deriv_speed[:-1] + deriv_speed[1:]) * delta_theta)
+        self._arc_lengths = cumulative
+        self.period_length = float(self._arc_lengths[-1])
+        self.period = self.period_length / self.speed if self.period_length > 1e-9 else 0.0
+
+    def _curve_position(self, theta: float | np.ndarray) -> np.ndarray:
+        theta = np.asarray(theta, dtype=np.float64)
+        x = self._half_length * np.sin(theta)
+        y = self._half_width * np.sin(2.0 * theta)
+        z = np.zeros_like(x, dtype=np.float64)
+        return np.stack((x, y, z), axis=-1)
+
+    def _curve_first_derivative(self, theta: float | np.ndarray) -> np.ndarray:
+        theta = np.asarray(theta, dtype=np.float64)
+        x = self._half_length * np.cos(theta)
+        y = self.width * np.cos(2.0 * theta)
+        z = np.zeros_like(x, dtype=np.float64)
+        return np.stack((x, y, z), axis=-1)
+
+    def _curve_second_derivative(self, theta: float | np.ndarray) -> np.ndarray:
+        theta = np.asarray(theta, dtype=np.float64)
+        x = -self._half_length * np.sin(theta)
+        y = -2.0 * self.width * np.sin(2.0 * theta)
+        z = np.zeros_like(x, dtype=np.float64)
+        return np.stack((x, y, z), axis=-1)
+
+    def _theta_from_arc_length(self, arc_length: float) -> float:
+        if self.period_length <= 1e-9:
+            return 0.0
+        wrapped_length = math.fmod(float(arc_length), self.period_length)
+        if wrapped_length < 0.0:
+            wrapped_length += self.period_length
+        return float(np.interp(wrapped_length, self._arc_lengths, self._theta_samples))
+
+    def state_at_time(self, time_s: float, *, center: np.ndarray) -> FigureEightReferenceState:
+        theta = self._theta_from_arc_length(self.speed * float(time_s))
+        curve_pos = self._curve_position(theta)
+        curve_d1 = self._curve_first_derivative(theta)
+        curve_d2 = self._curve_second_derivative(theta)
+
+        tangent_norm = max(float(np.linalg.norm(curve_d1)), 1e-6)
+        tangent_norm_derivative = float(np.dot(curve_d1, curve_d2) / tangent_norm)
+        theta_dot = self.speed / tangent_norm
+        theta_ddot = -(self.speed * self.speed) * tangent_norm_derivative / max(tangent_norm**3, 1e-9)
+
+        velocity = curve_d1 * theta_dot
+        acceleration = curve_d2 * (theta_dot**2) + curve_d1 * theta_ddot
+        position = np.asarray(center, dtype=np.float64).reshape(3) + curve_pos
+
+        yaw = math.atan2(float(velocity[1]), float(velocity[0]))
+        yaw_denom = float(velocity[0] * velocity[0] + velocity[1] * velocity[1])
+        yaw_dot = (
+            float((velocity[0] * acceleration[1] - velocity[1] * acceleration[0]) / yaw_denom)
+            if yaw_denom > 1e-9
+            else 0.0
+        )
+
+        return FigureEightReferenceState(
+            position=np.array(position, dtype=np.float64),
+            velocity=np.array(velocity, dtype=np.float64),
+            acceleration=np.array(acceleration, dtype=np.float64),
+            yaw=float(yaw),
+            yaw_dot=float(yaw_dot),
+        )
 
 
 def _ensure_isaaclab_pythonpath() -> None:
@@ -411,6 +508,54 @@ def _parse_arguments() -> argparse.Namespace:
         help="Adaptive yaw-rate factor used by the internal quintic-goal trajectory.",
     )
     parser.add_argument(
+        "--rolling_figure8",
+        action="store_true",
+        default=False,
+        help="Enable an internal rolling-horizon figure-eight tracking mission.",
+    )
+    parser.add_argument(
+        "--figure8_length",
+        type=float,
+        default=80.0,
+        help="Overall figure-eight length in meters along the longitudinal axis.",
+    )
+    parser.add_argument(
+        "--figure8_width",
+        type=float,
+        default=40.0,
+        help="Overall figure-eight width in meters along the lateral axis.",
+    )
+    parser.add_argument(
+        "--figure8_speed",
+        type=float,
+        default=6.0,
+        help="Constant nominal speed in m/s along the figure-eight reference.",
+    )
+    parser.add_argument(
+        "--figure8_horizon_s",
+        type=float,
+        default=1.67,
+        help="Receding-horizon quintic planning horizon in seconds.",
+    )
+    parser.add_argument(
+        "--figure8_endpoint_update_dt",
+        type=float,
+        default=0.02,
+        help="Seconds between updates of the rolling terminal state sent to the planner.",
+    )
+    parser.add_argument(
+        "--figure8_replan_dt",
+        type=float,
+        default=0.03,
+        help="Seconds between successive rolling-horizon quintic replans.",
+    )
+    parser.add_argument(
+        "--figure8_initial_hover_s",
+        type=float,
+        default=0.0,
+        help="Seconds to hover at the stabilized startup position before entering the figure-eight track.",
+    )
+    parser.add_argument(
         "--telemetry_log_path",
         type=str,
         default=_default_hover_telemetry_filename(),
@@ -430,6 +575,42 @@ def _parse_arguments() -> argparse.Namespace:
         type=float,
         default=0.12,
         help="Visual-only multiplier applied to rotor angular speed in GUI mode.",
+    )
+    parser.add_argument(
+        "--disable_path_visualization",
+        action="store_true",
+        default=False,
+        help="Disable GUI-only trajectory path visualization for the quintic reference and actual flight path.",
+    )
+    parser.add_argument(
+        "--path_visualization_reference_samples",
+        type=int,
+        default=120,
+        help="Number of samples used to draw the quintic reference path in GUI mode.",
+    )
+    parser.add_argument(
+        "--path_visualization_actual_stride",
+        type=int,
+        default=1,
+        help="Append one actual-flight path point every N simulation steps in GUI mode.",
+    )
+    parser.add_argument(
+        "--path_visualization_max_actual_points",
+        type=int,
+        default=0,
+        help="Maximum number of actual-flight points kept for GUI path visualization. Use 0 to keep the full history.",
+    )
+    parser.add_argument(
+        "--path_visualization_reference_width",
+        type=float,
+        default=3.0,
+        help="Line width for the quintic reference path in GUI mode.",
+    )
+    parser.add_argument(
+        "--path_visualization_actual_width",
+        type=float,
+        default=8.0,
+        help="Line width for the actual flight path in GUI mode.",
     )
     parser.add_argument(
         "--disable_tiled_camera",
@@ -844,6 +1025,9 @@ def main() -> None:
             self._last_depth: Optional[np.ndarray] = None
             self._last_state: Optional[np.ndarray] = None
             self._last_states: Optional[np.ndarray] = None
+            self._linear_acc_estimate = np.zeros(3, dtype=np.float64)
+            self._last_linear_velocity_sample: Optional[np.ndarray] = None
+            self._last_linear_velocity_sample_time: Optional[float] = None
             self._latest_reference_pos: Optional[np.ndarray] = None
             self._latest_reference_yaw: Optional[float] = None
             self._last_att_quat = (1.0, 0.0, 0.0, 0.0)
@@ -945,6 +1129,33 @@ def main() -> None:
             self._quintic_last_sample_time = 0.0
             self._quintic_last_yaw = 0.0
             self._quintic_terminal_logged = False
+            self._rolling_figure8 = bool(args_cli.rolling_figure8)
+            self._figure8_length = max(1e-3, float(args_cli.figure8_length))
+            self._figure8_width = max(1e-3, float(args_cli.figure8_width))
+            self._figure8_speed = max(1e-3, float(args_cli.figure8_speed))
+            self._figure8_horizon_s = max(self._physics_dt, float(args_cli.figure8_horizon_s))
+            self._figure8_endpoint_update_dt = max(self._physics_dt, float(args_cli.figure8_endpoint_update_dt))
+            self._figure8_replan_dt = max(self._physics_dt, float(args_cli.figure8_replan_dt))
+            self._figure8_initial_hover_s = max(0.0, float(args_cli.figure8_initial_hover_s))
+            self._figure8_reference = (
+                FigureEightReference(
+                    length=self._figure8_length,
+                    width=self._figure8_width,
+                    speed=self._figure8_speed,
+                )
+                if self._rolling_figure8
+                else None
+            )
+            self._figure8_center: Optional[np.ndarray] = None
+            self._figure8_start_time = 0.0
+            self._figure8_phase = "idle"
+            self._figure8_endpoint_state: Optional[FigureEightReferenceState] = None
+            self._figure8_nominal_state: Optional[FigureEightReferenceState] = None
+            self._figure8_last_endpoint_update_time = float("-inf")
+            self._figure8_last_replan_time = float("-inf")
+            self._figure8_plan_start_time = 0.0
+            self._figure8_trajectory: Optional[QuinticTrajectory] = None
+            self._figure8_last_sample_time = 0.0
             self._enable_rotor_spin_visual = (not bool(getattr(args_cli, "headless", False))) and (not args_cli.disable_rotor_spin_visual)
             self._rotor_spin_visual_scale = max(0.0, float(args_cli.rotor_spin_visual_scale))
             self._rotor_joint_ids: list[int] = []
@@ -952,6 +1163,25 @@ def main() -> None:
             self._rotor_joint_angles: Optional[torch.Tensor] = None
             self._rotor_joint_zero_vel: Optional[torch.Tensor] = None
             self._rotor_joint_directions: Optional[torch.Tensor] = None
+            self._enable_path_visualization = (not bool(getattr(args_cli, "headless", False))) and (not args_cli.disable_path_visualization)
+            self._path_reference_sample_count = max(2, int(args_cli.path_visualization_reference_samples))
+            self._path_actual_stride = max(1, int(args_cli.path_visualization_actual_stride))
+            self._path_actual_max_points = max(0, int(args_cli.path_visualization_max_actual_points))
+            self._path_reference_width = max(1.0, float(args_cli.path_visualization_reference_width))
+            self._path_actual_width = max(1.0, float(args_cli.path_visualization_actual_width))
+            self._path_reference_color = [0.10, 0.85, 1.00, 1.00]
+            self._path_actual_color = [1.00, 0.35, 0.15, 1.00]
+            self._path_preview_color = [0.95, 0.92, 0.20, 1.00]
+            self._path_preview_width = max(self._path_reference_width + 2.0, self._path_actual_width * 0.65)
+            self._path_reference_radius = max(0.003, 0.0025 * self._path_reference_width)
+            self._path_actual_radius = max(0.004, 0.0025 * self._path_actual_width)
+            self._path_visual_mode = "none"
+            self._path_draw_interface = None
+            self._path_segment_visualizer = None
+            self._path_reference_points: list[list[float]] = []
+            self._path_preview_points: list[list[float]] = []
+            self._path_actual_points: list[list[float]] = []
+            self._path_actual_stride_counter = 0
             self._tiled_camera_update_failed = False
 
             self._enable_rate_ctrl = False
@@ -1023,14 +1253,17 @@ def main() -> None:
 
             self._cache_state()
             self._setup_rotor_spin_visual()
+            self._setup_path_visualization()
             self._refresh_hold_target(self._last_state, reason="startup", apply_command=True, log_update=True)
             self._run_startup_hover_settle()
             self._log_controller_model(ctrl_model)
             self._log_controller_tuning()
             self._log_auto_target_goal_plan()
             self._log_quintic_goal_plan()
+            self._log_rolling_figure8_plan()
             self._restart_auto_target_goal_task(reason="startup")
             self._restart_quintic_goal_task(reason="startup")
+            self._restart_rolling_figure8_task(reason="startup")
 
             if self._ros_enabled:
                 self._depth_pub = self.create_publisher(Image, depth_topic, 10)
@@ -1218,6 +1451,197 @@ def main() -> None:
                 return
             self._rotor_joint_angles[env_ids] = 0.0
             self._write_rotor_spin_visual(env_ids=env_ids)
+
+        def _setup_path_visualization(self) -> None:
+            if not self._enable_path_visualization:
+                return
+            self._path_segment_visualizer = None
+            try:
+                import isaacsim.util.debug_draw._debug_draw as omni_debug_draw
+            except ImportError as exc:
+                self.get_logger().warning(f"Trajectory path visualization disabled: failed to import debug draw: {exc}")
+                self._enable_path_visualization = False
+                return
+            try:
+                self._path_draw_interface = omni_debug_draw.acquire_debug_draw_interface()
+                self._path_visual_mode = "debug_draw"
+                self.get_logger().info(
+                    "Enabled GUI trajectory path visualization: "
+                    f"mode=debug_draw_overlay, reference_samples={self._path_reference_sample_count}, "
+                    f"actual_stride={self._path_actual_stride}, "
+                    f"actual_max_points={self._path_actual_max_points}."
+                )
+            except Exception as exc:
+                self.get_logger().warning(f"Trajectory path visualization disabled: failed to acquire debug draw interface: {exc}")
+                self._enable_path_visualization = False
+                self._path_visual_mode = "none"
+                self._path_draw_interface = None
+
+        def _clear_path_visualization(self) -> None:
+            if self._path_segment_visualizer is not None:
+                with contextlib.suppress(Exception):
+                    self._path_segment_visualizer.set_visibility(False)
+            if self._path_draw_interface is None:
+                return
+            with contextlib.suppress(Exception):
+                self._path_draw_interface.clear_lines()
+
+        def _reset_path_visualization(self) -> None:
+            self._path_reference_points.clear()
+            self._path_preview_points.clear()
+            self._path_actual_points.clear()
+            self._path_actual_stride_counter = 0
+            self._clear_path_visualization()
+
+        @staticmethod
+        def _quat_from_z_axis_to_vector(direction: np.ndarray) -> np.ndarray:
+            direction = np.array(direction, dtype=np.float64)
+            norm = float(np.linalg.norm(direction))
+            if norm <= 1e-9:
+                return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+            direction /= norm
+            dot = float(np.clip(direction[2], -1.0, 1.0))
+            if dot >= 1.0 - 1e-6:
+                return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+            if dot <= -1.0 + 1e-6:
+                return np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)
+            cross = np.array([-direction[1], direction[0], 0.0], dtype=np.float64)
+            quat = np.array([1.0 + dot, cross[0], cross[1], cross[2]], dtype=np.float64)
+            quat_norm = float(np.linalg.norm(quat))
+            if quat_norm <= 1e-9:
+                return np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+            quat /= quat_norm
+            return quat.astype(np.float32)
+
+        def _build_path_segment_visualization(
+            self,
+            points: list[list[float]],
+            *,
+            marker_index: int,
+            radius: float,
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+            if len(points) < 2:
+                return None
+            point_array = np.asarray(points, dtype=np.float32)
+            start_points = point_array[:-1]
+            end_points = point_array[1:]
+            deltas = end_points - start_points
+            lengths = np.linalg.norm(deltas, axis=1)
+            valid = lengths > 1e-5
+            if not np.any(valid):
+                return None
+            start_points = start_points[valid]
+            end_points = end_points[valid]
+            deltas = deltas[valid]
+            lengths = lengths[valid]
+            translations = 0.5 * (start_points + end_points)
+            orientations = np.stack([self._quat_from_z_axis_to_vector(delta) for delta in deltas], axis=0)
+            scales = np.full((translations.shape[0], 3), radius, dtype=np.float32)
+            scales[:, 2] = lengths.astype(np.float32)
+            marker_indices = np.full((translations.shape[0],), marker_index, dtype=np.int32)
+            return translations, orientations, scales, marker_indices
+
+        def _rebuild_quintic_reference_visual(self) -> None:
+            if not self._enable_path_visualization:
+                return
+            active_trajectory: Optional[QuinticTrajectory] = None
+            active_duration = 0.0
+            if self._rolling_figure8 and self._figure8_trajectory is not None and self._figure8_phase == "cruise":
+                active_trajectory = self._figure8_trajectory
+                active_duration = self._figure8_horizon_s
+            elif self._quintic_trajectory is not None:
+                active_trajectory = self._quintic_trajectory
+                active_duration = self._quintic_duration
+            if active_trajectory is None:
+                self._path_preview_points.clear()
+                self._draw_path_visualization()
+                return
+            sample_dt = max(active_duration / max(self._path_reference_sample_count - 1, 1), 1e-3)
+            last_yaw = float(self._reset_yaw) if self._reset_yaw is not None else 0.0
+            points: list[list[float]] = []
+            for t in np.linspace(0.0, active_duration, self._path_reference_sample_count):
+                sample = active_trajectory.sample(float(t), last_yaw=last_yaw, dt=sample_dt)
+                last_yaw = float(sample.yaw)
+                points.append([float(sample.position[0]), float(sample.position[1]), float(sample.position[2])])
+            self._path_preview_points = points
+            self._draw_path_visualization()
+
+        def _draw_path_visualization(self) -> None:
+            if self._path_draw_interface is None:
+                return
+
+            start_points: list[list[float]] = []
+            end_points: list[list[float]] = []
+            line_colors: list[list[float]] = []
+            line_widths: list[float] = []
+
+            def _append_segments(points: list[list[float]], color: list[float], width: float) -> None:
+                if len(points) < 2:
+                    return
+                for idx in range(len(points) - 1):
+                    start_points.append(points[idx])
+                    end_points.append(points[idx + 1])
+                    line_colors.append(color)
+                    line_widths.append(width)
+
+            _append_segments(self._path_reference_points, self._path_reference_color, self._path_reference_width)
+            _append_segments(self._path_preview_points, self._path_preview_color, self._path_preview_width)
+            _append_segments(self._path_actual_points, self._path_actual_color, self._path_actual_width)
+
+            self._clear_path_visualization()
+            if start_points:
+                self._path_draw_interface.draw_lines(start_points, end_points, line_colors, line_widths)
+
+        def _path_visualization_active(self) -> bool:
+            quintic_active = (
+                self._quintic_goal is not None
+                and self._quintic_trajectory is not None
+                and self._quintic_phase in {"cruise", "goal_hold"}
+            )
+            rolling_figure8_active = (
+                self._rolling_figure8
+                and self._figure8_trajectory is not None
+                and self._figure8_phase == "cruise"
+            )
+            return self._enable_path_visualization and self._path_draw_interface is not None and (
+                quintic_active or rolling_figure8_active
+            )
+
+        def _append_actual_path_point(self, point: Sequence[float]) -> None:
+            if not self._path_visualization_active():
+                return
+            point_list = [float(point[0]), float(point[1]), float(point[2])]
+            self._path_actual_points.append(point_list)
+            if self._path_actual_max_points > 0 and len(self._path_actual_points) > self._path_actual_max_points:
+                overflow = len(self._path_actual_points) - self._path_actual_max_points
+                del self._path_actual_points[:overflow]
+            self._draw_path_visualization()
+
+        def _append_reference_path_point(self, point: Sequence[float]) -> None:
+            if not self._path_visualization_active():
+                return
+            point_list = [float(point[0]), float(point[1]), float(point[2])]
+            if self._path_reference_points:
+                last_point = self._path_reference_points[-1]
+                if math.dist(last_point, point_list) <= 1e-6:
+                    return
+            self._path_reference_points.append(point_list)
+
+        def _update_path_visualization(self) -> None:
+            if self._last_state is None:
+                return
+            self._append_actual_path_point(self._last_state[:3])
+
+        @staticmethod
+        def _clip_vector_norm(vector: np.ndarray, max_norm: float) -> np.ndarray:
+            clipped = np.array(vector, dtype=np.float32, copy=True)
+            limit = float(max_norm)
+            if limit <= 0.0:
+                return clipped
+            norm = float(np.linalg.norm(clipped))
+            if norm > limit and norm > 1e-6:
+                clipped *= limit / norm
+            return clipped
 
         def _body_index(self) -> int:
             body_id = self._body_id
@@ -1426,6 +1850,26 @@ def main() -> None:
                     "The internal quintic-goal task will take priority."
                 )
 
+        def _log_rolling_figure8_plan(self) -> None:
+            if not self._rolling_figure8 or self._figure8_reference is None:
+                return
+            self.get_logger().info(
+                "Configured internal rolling figure-eight task: "
+                f"length={self._figure8_length:.2f} m, "
+                f"width={self._figure8_width:.2f} m, "
+                f"speed={self._figure8_speed:.2f} m/s, "
+                f"horizon={self._figure8_horizon_s:.2f}s, "
+                f"endpoint_dt={self._figure8_endpoint_update_dt:.2f}s, "
+                f"replan_dt={self._figure8_replan_dt:.2f}s, "
+                f"startup_hover={self._figure8_initial_hover_s:.2f}s, "
+                f"period={self._figure8_reference.period:.2f}s."
+            )
+            if self._quintic_goal is not None or self._auto_target_goal is not None:
+                self.get_logger().warning(
+                    "Multiple internal missions were configured. "
+                    "The rolling figure-eight task will take priority over --quintic_goal and --auto_target_goal."
+                )
+
         def _restart_auto_target_goal_task(self, *, reason: str) -> None:
             if self._auto_target_goal is None:
                 return
@@ -1449,12 +1893,94 @@ def main() -> None:
             self._quintic_last_sample_time = float(self._current_sim_time)
             self._quintic_last_yaw = float(self._reset_yaw) if self._reset_yaw is not None else 0.0
             self._quintic_terminal_logged = False
+            self._reset_path_visualization()
             if reason != "startup":
                 self.get_logger().info(
                     "Restarted internal quintic-goal task "
                     f"after {reason}: goal=({self._quintic_goal[0]:.3f}, "
                     f"{self._quintic_goal[1]:.3f}, {self._quintic_goal[2]:.3f})."
                 )
+
+        def _restart_rolling_figure8_task(self, *, reason: str) -> None:
+            if not self._rolling_figure8:
+                return
+            self._figure8_center = None if self._reset_pos is None else np.array(self._reset_pos, dtype=np.float64).copy()
+            self._figure8_start_time = float(self._current_sim_time)
+            self._figure8_phase = "idle"
+            self._figure8_endpoint_state = None
+            self._figure8_nominal_state = None
+            self._figure8_last_endpoint_update_time = float("-inf")
+            self._figure8_last_replan_time = float("-inf")
+            self._figure8_plan_start_time = float(self._current_sim_time)
+            self._figure8_trajectory = None
+            self._figure8_last_sample_time = float(self._current_sim_time)
+            self._reset_path_visualization()
+            if reason != "startup":
+                center = self._figure8_center if self._figure8_center is not None else np.zeros(3, dtype=np.float64)
+                self.get_logger().info(
+                    "Restarted internal rolling figure-eight task "
+                    f"after {reason}: center=({center[0]:.3f}, {center[1]:.3f}, {center[2]:.3f})."
+                )
+
+        def _update_rolling_figure8_endpoint(self, *, now: float, track_time: float, force: bool = False) -> None:
+            if not self._rolling_figure8 or self._figure8_reference is None or self._figure8_center is None:
+                return
+            if (not force) and (now - self._figure8_last_endpoint_update_time < self._figure8_endpoint_update_dt - 1e-9):
+                return
+            self._figure8_endpoint_state = self._figure8_reference.state_at_time(
+                track_time + self._figure8_horizon_s,
+                center=self._figure8_center,
+            )
+            self._figure8_last_endpoint_update_time = float(now)
+            self._publish_goal_target(self._figure8_endpoint_state.position, float(now))
+
+        def _replan_rolling_figure8_trajectory(self, *, now: float, track_time: float, force: bool = False) -> None:
+            if (
+                not self._rolling_figure8
+                or self._figure8_reference is None
+                or self._figure8_center is None
+                or self._last_state is None
+            ):
+                return
+            if self._figure8_endpoint_state is None:
+                self._update_rolling_figure8_endpoint(now=now, track_time=track_time, force=True)
+            if self._figure8_endpoint_state is None:
+                return
+            if (not force) and (now - self._figure8_last_replan_time < self._figure8_replan_dt - 1e-9):
+                return
+
+            was_tracking = self._figure8_phase == "cruise" and self._figure8_trajectory is not None
+            start_state = np.array(self._last_state, dtype=np.float64)
+            start_pos = start_state[:3]
+            self._figure8_nominal_state = self._figure8_reference.state_at_time(track_time, center=self._figure8_center)
+            start_vel = np.array(start_state[7:10], dtype=np.float64) if start_state.size >= 10 else np.zeros(3, dtype=np.float64)
+            start_acc = np.array(self._linear_acc_estimate, dtype=np.float64)
+            self._figure8_trajectory = QuinticTrajectory(
+                start_pos=np.array(start_pos, dtype=np.float64),
+                start_vel=start_vel,
+                start_acc=start_acc,
+                goal_pos=np.array(self._figure8_endpoint_state.position, dtype=np.float64),
+                goal_vel=np.array(self._figure8_endpoint_state.velocity, dtype=np.float64),
+                goal_acc=np.array(self._figure8_endpoint_state.acceleration, dtype=np.float64),
+                duration=self._figure8_horizon_s,
+                yaw_mode="initial",
+                initial_yaw=float(self._figure8_nominal_state.yaw),
+                fixed_yaw=float(self._figure8_nominal_state.yaw),
+                max_yaw_rate=self._quintic_max_yaw_rate,
+            )
+            self._figure8_plan_start_time = float(now)
+            self._figure8_last_replan_time = float(now)
+            self._figure8_last_sample_time = float(now)
+            self._figure8_phase = "cruise"
+            if not was_tracking:
+                self._path_actual_points = [[float(start_pos[0]), float(start_pos[1]), float(start_pos[2])]]
+                self._path_actual_stride_counter = 0
+                self.get_logger().info(
+                    "Internal rolling figure-eight task: "
+                    f"tracking started from ({start_pos[0]:.3f}, {start_pos[1]:.3f}, {start_pos[2]:.3f}) "
+                    f"with horizon={self._figure8_horizon_s:.2f}s and replan_dt={self._figure8_replan_dt:.2f}s."
+                )
+            self._rebuild_quintic_reference_visual()
 
         def _refresh_hold_target(
             self,
@@ -1475,6 +2001,7 @@ def main() -> None:
                 current_quat = tuple(float(v) for v in state_array[3:7])
                 _, _, self._reset_yaw = self._quaternion_to_euler_zyx(current_quat)
             self._last_state = state_array.copy()
+            self._reset_linear_acceleration_estimate(state_array)
             if apply_command:
                 self._set_hover_command()
             if log_update:
@@ -1515,11 +2042,92 @@ def main() -> None:
             self._set_hover_command()
 
         def _apply_default_command(self) -> None:
+            if self._apply_rolling_figure8_command():
+                return
             if self._apply_quintic_goal_command():
                 return
             if self._apply_auto_target_goal_command():
                 return
             self._apply_timeout_hold()
+
+        def _apply_rolling_figure8_command(self) -> bool:
+            if (
+                not self._rolling_figure8
+                or self._figure8_reference is None
+                or self._last_state is None
+                or self._reset_pos is None
+            ):
+                return False
+
+            if self._figure8_center is None:
+                self._figure8_center = np.array(self._reset_pos, dtype=np.float64).copy()
+
+            mission_time = max(0.0, float(self._current_sim_time) - float(self._figure8_start_time))
+            hover_yaw = float(self._reset_yaw) if self._reset_yaw is not None else 0.0
+            if mission_time < self._figure8_initial_hover_s:
+                if self._figure8_phase != "startup_hover":
+                    self._figure8_phase = "startup_hover"
+                    self.get_logger().info(
+                        "Internal rolling figure-eight task: "
+                        f"holding startup position for {self._figure8_initial_hover_s:.2f}s before entering the track."
+                    )
+                self._apply_position_command(
+                    np.array(self._reset_pos, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    hover_yaw,
+                    0.0,
+                )
+                return True
+
+            track_time = mission_time - self._figure8_initial_hover_s
+            self._figure8_nominal_state = self._figure8_reference.state_at_time(track_time, center=self._figure8_center)
+            self._update_rolling_figure8_endpoint(
+                now=float(self._current_sim_time),
+                track_time=track_time,
+                force=self._figure8_endpoint_state is None,
+            )
+            self._replan_rolling_figure8_trajectory(
+                now=float(self._current_sim_time),
+                track_time=track_time,
+                force=self._figure8_trajectory is None,
+            )
+            if self._figure8_trajectory is None:
+                nominal = self._figure8_nominal_state
+                nominal_vel = self._clip_vector_norm(np.array(nominal.velocity, dtype=np.float32), self._figure8_speed)
+                self._apply_position_command(
+                    np.array(nominal.position, dtype=np.float32),
+                    nominal_vel,
+                    np.array(nominal.acceleration, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    float(nominal.yaw),
+                    float(nominal.yaw_dot),
+                )
+                return True
+
+            elapsed = max(0.0, float(self._current_sim_time) - float(self._figure8_plan_start_time))
+            dt = max(float(self._current_sim_time) - float(self._figure8_last_sample_time), self._physics_dt, 1e-3)
+            sample = self._figure8_trajectory.sample(elapsed, last_yaw=float(self._figure8_nominal_state.yaw), dt=dt)
+            pos_des, vel_des, acc_des, jerk_des, _, _ = sample.as_eval_inputs()
+            vel_limit = self._figure8_speed
+            if self._last_state is not None and self._last_state.size >= 10:
+                actual_speed = float(np.linalg.norm(np.array(self._last_state[7:10], dtype=np.float64)))
+                if actual_speed > self._figure8_speed + 0.05:
+                    vel_limit = max(0.0, self._figure8_speed - 0.75 * (actual_speed - self._figure8_speed))
+            vel_des = self._clip_vector_norm(vel_des, vel_limit)
+            nominal_acc_limit = max(1.0, 1.10 * float(np.linalg.norm(self._figure8_nominal_state.acceleration)))
+            acc_des = self._clip_vector_norm(acc_des, nominal_acc_limit)
+            self._apply_position_command(
+                pos_des,
+                vel_des,
+                acc_des,
+                jerk_des,
+                float(self._figure8_nominal_state.yaw),
+                float(self._figure8_nominal_state.yaw_dot),
+            )
+            self._figure8_last_sample_time = float(self._current_sim_time)
+            return True
 
         def _apply_quintic_goal_command(self) -> bool:
             if self._quintic_goal is None or self._last_state is None or self._reset_pos is None:
@@ -1569,6 +2177,9 @@ def main() -> None:
                 )
                 self._quintic_last_sample_time = float(self._current_sim_time)
                 self._quintic_phase = "cruise"
+                self._path_actual_points = [[float(start_pos[0]), float(start_pos[1]), float(start_pos[2])]]
+                self._path_actual_stride_counter = 0
+                self._rebuild_quintic_reference_visual()
                 self.get_logger().info(
                     "Internal quintic-goal task: "
                     f"planned from ({start_pos[0]:.3f}, {start_pos[1]:.3f}, {start_pos[2]:.3f}) "
@@ -1711,7 +2322,32 @@ def main() -> None:
             self._unwrapped.reset_time_outs = reset_time_outs
             self._unwrapped.reset_buf = reset_terminated | reset_time_outs
 
+        def _publish_goal_target(self, position: np.ndarray, timestamp: float) -> None:
+            pos = np.asarray(position, dtype=np.float64).reshape(3)
+            if self._ros_enabled and self._goal_pub is not None:
+                goal = PoseStamped()
+                self._fill_header(goal.header, timestamp)
+                goal.pose.position.x = float(pos[0])
+                goal.pose.position.y = float(pos[1])
+                goal.pose.position.z = float(pos[2])
+                goal.pose.orientation.w = 1.0
+                self._goal_pub.publish(goal)
+            if self._use_ros2_sidecar:
+                self._send_sidecar_payload(
+                    {
+                        "type": "goal",
+                        "stamp": float(timestamp),
+                        "frame_id": self._frame_id,
+                        "position": [float(pos[0]), float(pos[1]), float(pos[2])],
+                    }
+                )
+
         def _goal_position_for_publish(self) -> Optional[np.ndarray]:
+            if self._rolling_figure8:
+                if self._figure8_endpoint_state is not None:
+                    return np.array(self._figure8_endpoint_state.position, copy=True)
+                if self._figure8_center is not None:
+                    return np.array(self._figure8_center, copy=True)
             if self._auto_target_goal is not None:
                 return np.array(self._auto_target_goal, copy=True)
             desired_pos = getattr(self._unwrapped, "_desired_pos_w", None)
@@ -1896,7 +2532,7 @@ def main() -> None:
                     f"err_to_start=({settle_err[0]:.3f}, {settle_err[1]:.3f}, {settle_err[2]:.3f}), "
                     f"speed={settle_speed:.3f} m/s."
                 )
-                if self._auto_target_goal is not None or self._quintic_goal is not None:
+                if self._auto_target_goal is not None or self._quintic_goal is not None or self._rolling_figure8:
                     # Use the stabilized pose as the mission start hover point so
                     # internally generated missions do not begin with a visible altitude sag.
                     self._refresh_hold_target(
@@ -1930,14 +2566,16 @@ def main() -> None:
                 self._refresh_hold_target(state, reason="env_reset", apply_command=True, log_update=True)
                 self._restart_auto_target_goal_task(reason="env_reset")
                 self._restart_quintic_goal_task(reason="env_reset")
+                self._restart_rolling_figure8_task(reason="env_reset")
                 self._controller.reset(reset_env_ids)
 
             if getattr(self._unwrapped, "_tiled_camera", None) is not None:
                 self._unwrapped.sim.render()
 
-            self._cache_state()
             sim_time = float(self._unwrapped._sim_step_counter) * self._physics_dt
             self._current_sim_time = sim_time
+            self._cache_state()
+            self._update_linear_acceleration_estimate(sim_time)
             self._cache_depth(sim_time)
             self._publish_odometry(sim_time)
             self._publish_ctrl_info(sim_time)
@@ -2012,6 +2650,11 @@ def main() -> None:
                     if count_sim_step and self._unwrapped._sim_step_counter % 4 == 0:
                         self._unwrapped.sim.render()
                     self._unwrapped.scene.update(dt=self._unwrapped.physics_dt)
+                    if count_sim_step and self._path_visualization_active():
+                        if self._latest_reference_pos is not None:
+                            self._append_reference_path_point(self._latest_reference_pos)
+                        current_pos = self._robot.data.root_state_w[self._drone_id, :3].detach().cpu().numpy()
+                        self._append_actual_path_point(current_pos)
 
         def _record_stats(self, timestamp: float, reset_flags: Optional[np.ndarray]) -> None:
             if self._reset_log_done or self._reset_log_target <= 0 or self._last_states is None:
@@ -2236,6 +2879,44 @@ def main() -> None:
             self._last_states = states
             if 0 <= self._drone_id < states.shape[0]:
                 self._last_state = states[self._drone_id]
+
+        def _reset_linear_acceleration_estimate(
+            self,
+            state: Optional[np.ndarray],
+            *,
+            timestamp: Optional[float] = None,
+        ) -> None:
+            if state is None:
+                self._last_linear_velocity_sample = None
+                self._last_linear_velocity_sample_time = float(self._current_sim_time if timestamp is None else timestamp)
+                self._linear_acc_estimate = np.zeros(3, dtype=np.float64)
+                return
+            state_array = np.array(state, dtype=np.float64).reshape(-1)
+            if state_array.size >= 10:
+                self._last_linear_velocity_sample = np.array(state_array[7:10], dtype=np.float64)
+                self._last_linear_velocity_sample_time = float(self._current_sim_time if timestamp is None else timestamp)
+            else:
+                self._last_linear_velocity_sample = None
+                self._last_linear_velocity_sample_time = None
+            self._linear_acc_estimate = np.zeros(3, dtype=np.float64)
+
+        def _update_linear_acceleration_estimate(self, timestamp: float) -> None:
+            if self._last_state is None or self._last_state.size < 10:
+                self._linear_acc_estimate = np.zeros(3, dtype=np.float64)
+                return
+
+            current_vel = np.array(self._last_state[7:10], dtype=np.float64)
+            if self._last_linear_velocity_sample is None or self._last_linear_velocity_sample_time is None:
+                self._last_linear_velocity_sample = current_vel
+                self._last_linear_velocity_sample_time = float(timestamp)
+                self._linear_acc_estimate = np.zeros(3, dtype=np.float64)
+                return
+
+            dt = float(timestamp) - float(self._last_linear_velocity_sample_time)
+            if dt > 1e-6:
+                self._linear_acc_estimate = (current_vel - self._last_linear_velocity_sample) / dt
+                self._last_linear_velocity_sample = current_vel
+                self._last_linear_velocity_sample_time = float(timestamp)
 
         def _cache_depth(self, timestamp: float) -> None:
             depth_tensor = self._get_depth_tensor()
@@ -2518,6 +3199,7 @@ def main() -> None:
             return fb
 
         def close(self) -> None:
+            self._clear_path_visualization()
             if self._telemetry_log_file is not None:
                 self._telemetry_log_file.close()
                 self._telemetry_log_file = None
