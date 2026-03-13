@@ -80,6 +80,18 @@ def _has_forwarded_option(forwarded_args: list[str], *option_names: str) -> bool
     return any(arg in option_set for arg in forwarded_args)
 
 
+def _prepend_default_option(forwarded_args: list[str], value: str, *option_names: str) -> list[str]:
+    if _has_forwarded_option(forwarded_args, *option_names):
+        return forwarded_args
+    return [option_names[0], value, *forwarded_args]
+
+
+def _prepend_default_flag(forwarded_args: list[str], option_name: str) -> list[str]:
+    if _has_forwarded_option(forwarded_args, option_name):
+        return forwarded_args
+    return [option_name, *forwarded_args]
+
+
 def _default_target_goal_telemetry_filename() -> str:
     return f"target_goal_{time.strftime('%Y%m%d_%H%M%S')}.csv"
 
@@ -165,6 +177,31 @@ def main() -> int:
 
     if "--disable_env_editor_scene_init" not in forwarded_args:
         forwarded_args = ["--env_editor_world_path", "/World", *forwarded_args]
+        forwarded_args = _prepend_default_flag(forwarded_args, "--add-random-forest")
+    forwarded_args = _prepend_default_option(
+        forwarded_args,
+        "0.0",
+        "--tiled_cam_depth_vis_near",
+        "--tiled-cam-depth-vis-near",
+    )
+    forwarded_args = _prepend_default_option(
+        forwarded_args,
+        "20.0",
+        "--tiled_cam_depth_vis_far",
+        "--tiled-cam-depth-vis-far",
+    )
+    forwarded_args = _prepend_default_option(
+        forwarded_args,
+        "200.0",
+        "--tiled_cam_clip_far",
+        "--tiled-cam-clip-far",
+    )
+    forwarded_args = _prepend_default_option(
+        forwarded_args,
+        "20.0",
+        "--tiled_cam_depth_clip_far",
+        "--tiled-cam-depth-clip-far",
+    )
 
     sys.argv = [sys.argv[0], *forwarded_args]
     eval_ego.main()

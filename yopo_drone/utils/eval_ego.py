@@ -720,6 +720,22 @@ def _parse_arguments() -> argparse.Namespace:
         help="Far clipping plane for the tiled camera.",
     )
     parser.add_argument(
+        "--tiled_cam_depth_clip_near",
+        "--tiled-cam-depth-clip-near",
+        dest="tiled_cam_depth_clip_near",
+        type=float,
+        default=0.05,
+        help="Near clipping plane for the depth-only tiled camera.",
+    )
+    parser.add_argument(
+        "--tiled_cam_depth_clip_far",
+        "--tiled-cam-depth-clip-far",
+        dest="tiled_cam_depth_clip_far",
+        type=float,
+        default=20.0,
+        help="Far clipping plane for the depth-only tiled camera.",
+    )
+    parser.add_argument(
         "--tiled_cam_warmup_steps",
         "--tiled-cam-warmup-steps",
         dest="tiled_cam_warmup_steps",
@@ -775,10 +791,87 @@ def _parse_arguments() -> argparse.Namespace:
         default=120,
         help="Fallback inset Y position when Render Settings window is unavailable.",
     )
+    parser.add_argument(
+        "--disable_tiled_camera_depth_inset",
+        "--disable-tiled-camera-depth-inset",
+        dest="disable_tiled_camera_depth_inset",
+        action="store_true",
+        default=False,
+        help="Disable the GUI depth inset for the tiled camera.",
+    )
+    parser.add_argument(
+        "--tiled_cam_depth_inset_window_name",
+        "--tiled-cam-depth-inset-window-name",
+        dest="tiled_cam_depth_inset_window_name",
+        type=str,
+        default="Tiled Camera Depth",
+        help="Window title for the GUI depth inset.",
+    )
+    parser.add_argument(
+        "--tiled_cam_depth_inset_width",
+        "--tiled-cam-depth-inset-width",
+        dest="tiled_cam_depth_inset_width",
+        type=int,
+        default=360,
+        help="Width of the GUI depth inset.",
+    )
+    parser.add_argument(
+        "--tiled_cam_depth_inset_height",
+        "--tiled-cam-depth-inset-height",
+        dest="tiled_cam_depth_inset_height",
+        type=int,
+        default=240,
+        help="Height of the GUI depth inset.",
+    )
+    parser.add_argument(
+        "--tiled_cam_depth_inset_pos_x",
+        "--tiled-cam-depth-inset-pos-x",
+        dest="tiled_cam_depth_inset_pos_x",
+        type=int,
+        default=1520,
+        help="Screen X position for the GUI depth inset.",
+    )
+    parser.add_argument(
+        "--tiled_cam_depth_inset_pos_y",
+        "--tiled-cam-depth-inset-pos-y",
+        dest="tiled_cam_depth_inset_pos_y",
+        type=int,
+        default=60,
+        help="Screen Y position for the GUI depth inset.",
+    )
+    parser.add_argument(
+        "--tiled_cam_depth_inset_update_interval",
+        "--tiled-cam-depth-inset-update-interval",
+        dest="tiled_cam_depth_inset_update_interval",
+        type=float,
+        default=0.1,
+        help="Seconds between GUI depth inset refreshes.",
+    )
+    parser.add_argument(
+        "--tiled_cam_depth_vis_near",
+        "--tiled-cam-depth-vis-near",
+        dest="tiled_cam_depth_vis_near",
+        type=float,
+        default=0.0,
+        help="Near depth used for grayscale mapping in the GUI depth inset.",
+    )
+    parser.add_argument(
+        "--tiled_cam_depth_vis_far",
+        "--tiled-cam-depth-vis-far",
+        dest="tiled_cam_depth_vis_far",
+        type=float,
+        default=20.0,
+        help="Far depth used for grayscale mapping in the GUI depth inset.",
+    )
     parser.add_argument("--disable_env_editor_scene_init", action="store_true", default=False, help="Do not initialize the stage with drone_env_editor-style world primitives before launching the planner/control environment.")
     parser.add_argument("--env_editor_world_path", type=str, default="/World", help="USD world path used when applying drone_env_editor scene initialization.")
     parser.add_argument("--disable_env_editor_lights", action="store_true", default=False, help="Skip adding drone_env_editor dome light during stage initialization.")
     parser.add_argument("--disable_env_editor_ground", action="store_true", default=False, help="Skip adding drone_env_editor ground plane during stage initialization.")
+    try:
+        from yopo_drone.env.random_forest_scene import add_random_forest_arguments
+    except ImportError:
+        from e2e_drone.env.random_forest_scene import add_random_forest_arguments
+    add_random_forest_arguments(parser)
     parser.add_argument("--disable_ros2_bridge", action="store_true", default=False, help="Disable UDP sidecar ROS 2 bridge when direct rclpy is unavailable.")
     parser.add_argument("--ros2_distro", type=str, default="jazzy", help="System ROS 2 distro used by the sidecar bridge.")
     parser.add_argument("--ros2_workspace", type=str, default="/workspace/isaaclab/ros2_ws", help="ROS 2 workspace path inside the container.")
@@ -909,8 +1002,13 @@ def main() -> None:
 
         return prim_path, view_path
 
-    def _warm_up_eval_tiled_camera(unwrapped) -> None:
-        tiled_camera = getattr(unwrapped, "_tiled_camera", None)
+    def _warm_up_eval_tiled_camera(
+        unwrapped,
+        *,
+        camera_attr_name: str = "_tiled_camera",
+        log_name: str = "Tiled camera",
+    ) -> None:
+        tiled_camera = getattr(unwrapped, camera_attr_name, None)
         if tiled_camera is None:
             return
 
@@ -930,12 +1028,15 @@ def main() -> None:
             depth = tiled_camera.data.output.get("distance_to_image_plane")
         rgb_shape = tuple(rgb.shape) if rgb is not None else None
         depth_shape = tuple(depth.shape) if depth is not None else None
-        print(f"[Info] Tiled camera data ready: rgb_shape={rgb_shape}, depth_shape={depth_shape}")
+        print(f"[Info] {log_name} data ready: rgb_shape={rgb_shape}, depth_shape={depth_shape}")
 
     def _maybe_create_eval_tiled_camera(env) -> None:
         unwrapped = env.unwrapped
         unwrapped._tiled_camera = None
+        unwrapped._tiled_depth_camera = None
         unwrapped._tiled_camera_inset_window = None
+        unwrapped._tiled_camera_depth_inset_state = None
+        unwrapped._tiled_camera_depth_update_fn = None
         unwrapped._tiled_camera_view_prim_path = None
         if not _tiled_camera_enabled():
             return
@@ -944,9 +1045,21 @@ def main() -> None:
         from isaaclab.sensors import TiledCamera, TiledCameraCfg
 
         try:
-            from yopo_drone.env.drone_env_editor import _add_tiled_camera, _attach_tiled_camera_inset
+            from yopo_drone.env.drone_env_editor import (
+                _add_tiled_camera,
+                _derive_depth_tiled_camera_prim_path,
+                _attach_tiled_camera_depth_inset,
+                _attach_tiled_camera_inset,
+                _update_tiled_camera_depth_inset,
+            )
         except ImportError:
-            from e2e_drone.env.drone_env_editor import _add_tiled_camera, _attach_tiled_camera_inset
+            from e2e_drone.env.drone_env_editor import (
+                _add_tiled_camera,
+                _derive_depth_tiled_camera_prim_path,
+                _attach_tiled_camera_depth_inset,
+                _attach_tiled_camera_inset,
+                _update_tiled_camera_depth_inset,
+            )
 
         sensor_prim_path, view_prim_path = _resolve_eval_tiled_camera_paths(unwrapped)
         tiled_camera_args = argparse.Namespace(**vars(args_cli))
@@ -957,13 +1070,29 @@ def main() -> None:
             sim_utils=sim_utils,
             TiledCamera=TiledCamera,
             TiledCameraCfg=TiledCameraCfg,
+            data_types=["rgb"],
+            log_name="Tiled RGB camera",
+        )
+        depth_sensor_prim_path = _derive_depth_tiled_camera_prim_path(sensor_prim_path)
+        depth_tiled_camera = _add_tiled_camera(
+            tiled_camera_args,
+            sim_utils=sim_utils,
+            TiledCamera=TiledCamera,
+            TiledCameraCfg=TiledCameraCfg,
+            prim_path=depth_sensor_prim_path,
+            data_types=["depth"],
+            clip_near=float(args_cli.tiled_cam_depth_clip_near),
+            clip_far=float(args_cli.tiled_cam_depth_clip_far),
+            log_name="Tiled depth camera",
         )
         sim_utils.update_stage()
 
         unwrapped._tiled_camera = tiled_camera
+        unwrapped._tiled_depth_camera = depth_tiled_camera
         unwrapped._tiled_camera_view_prim_path = view_prim_path
 
-        _warm_up_eval_tiled_camera(unwrapped)
+        _warm_up_eval_tiled_camera(unwrapped, camera_attr_name="_tiled_camera", log_name="Tiled RGB camera")
+        _warm_up_eval_tiled_camera(unwrapped, camera_attr_name="_tiled_depth_camera", log_name="Tiled depth camera")
 
         inset_window = None
         if not bool(getattr(args_cli, "headless", False)) and not bool(args_cli.disable_tiled_camera_inset):
@@ -971,12 +1100,28 @@ def main() -> None:
             inset_args.tiled_cam_prim_path = view_prim_path
             inset_window = _attach_tiled_camera_inset(inset_args)
         unwrapped._tiled_camera_inset_window = inset_window
+        depth_inset_args = argparse.Namespace(**vars(args_cli))
+        depth_inset_args.tiled_cam_prim_path = view_prim_path
+        print(
+            "[Info] Eval tiled camera depth config:"
+            f" helper_module={_attach_tiled_camera_depth_inset.__module__},"
+            f" near={depth_inset_args.tiled_cam_depth_vis_near},"
+            f" far={depth_inset_args.tiled_cam_depth_vis_far},"
+            f" rgb_clip_far={depth_inset_args.tiled_cam_clip_far},"
+            f" depth_clip_far={depth_inset_args.tiled_cam_depth_clip_far}",
+            flush=True,
+        )
+        depth_inset_state = _attach_tiled_camera_depth_inset(depth_inset_args, depth_tiled_camera)
+        unwrapped._tiled_camera_depth_inset_state = depth_inset_state
+        unwrapped._tiled_camera_depth_update_fn = _update_tiled_camera_depth_inset
 
         print(
             "[Info] Enabled eval tiled camera:"
-            f" sensor_prim={sensor_prim_path},"
+            f" rgb_sensor_prim={sensor_prim_path},"
+            f" depth_sensor_prim={depth_sensor_prim_path},"
             f" inset_camera={view_prim_path},"
-            f" inset={'off' if inset_window is None else 'on'}"
+            f" inset={'off' if inset_window is None else 'on'},"
+            f" depth_inset={'off' if depth_inset_state is None else 'on'}"
         )
 
     # =================================================================================
@@ -2360,29 +2505,41 @@ def main() -> None:
             if self._tiled_camera_update_failed:
                 return None
             tiled_camera = getattr(self._unwrapped, "_tiled_camera", None)
-            if tiled_camera is None:
+            depth_tiled_camera = getattr(self._unwrapped, "_tiled_depth_camera", None)
+            if tiled_camera is None and depth_tiled_camera is None:
                 return None
             try:
-                if (not getattr(tiled_camera, "_is_initialized", False)) or (not hasattr(tiled_camera, "_timestamp")):
-                    tiled_camera._initialize_impl()
-                    tiled_camera._is_initialized = True
+                for camera in (tiled_camera, depth_tiled_camera):
+                    if camera is None:
+                        continue
+                    if (not getattr(camera, "_is_initialized", False)) or (not hasattr(camera, "_timestamp")):
+                        camera._initialize_impl()
+                        camera._is_initialized = True
+                        with contextlib.suppress(Exception):
+                            camera.reset()
+                    camera.update(self._physics_dt, force_recompute=True)
+                depth_inset_state = getattr(self._unwrapped, "_tiled_camera_depth_inset_state", None)
+                depth_update_fn = getattr(self._unwrapped, "_tiled_camera_depth_update_fn", None)
+                if depth_inset_state is not None and depth_update_fn is not None and depth_tiled_camera is not None:
                     with contextlib.suppress(Exception):
-                        tiled_camera.reset()
-                tiled_camera.update(self._physics_dt, force_recompute=True)
+                        depth_update_fn(args_cli, depth_tiled_camera, depth_inset_state)
             except Exception as exc:
                 self._tiled_camera_update_failed = True
                 self.get_logger().warning(f"Tiled camera disabled after update failure: {exc}")
                 self._unwrapped._tiled_camera = None
+                if hasattr(self._unwrapped, "_tiled_depth_camera"):
+                    self._unwrapped._tiled_depth_camera = None
                 return None
             return tiled_camera
 
         def _get_depth_tensor(self):
-            tiled_camera = self._refresh_tiled_camera()
-            if tiled_camera is None:
+            self._refresh_tiled_camera()
+            depth_tiled_camera = getattr(self._unwrapped, "_tiled_depth_camera", None)
+            if depth_tiled_camera is None:
                 return None
-            depth_tensor = tiled_camera.data.output.get("depth", None)
+            depth_tensor = depth_tiled_camera.data.output.get("depth", None)
             if depth_tensor is None:
-                depth_tensor = tiled_camera.data.output.get("distance_to_image_plane", None)
+                depth_tensor = depth_tiled_camera.data.output.get("distance_to_image_plane", None)
             return depth_tensor
 
         def _setup_ros2_sidecar(self, *, depth_topic: str, odom_topic: str, cmd_topic: str) -> None:
@@ -3209,8 +3366,17 @@ def main() -> None:
                 with contextlib.suppress(Exception):
                     inset_window.destroy()
                 self._unwrapped._tiled_camera_inset_window = None
+            depth_inset_state = getattr(self._unwrapped, "_tiled_camera_depth_inset_state", None)
+            if depth_inset_state is not None:
+                with contextlib.suppress(Exception):
+                    depth_inset_state["window"].destroy()
+                self._unwrapped._tiled_camera_depth_inset_state = None
+            if hasattr(self._unwrapped, "_tiled_camera_depth_update_fn"):
+                self._unwrapped._tiled_camera_depth_update_fn = None
             if hasattr(self._unwrapped, "_tiled_camera"):
                 self._unwrapped._tiled_camera = None
+            if hasattr(self._unwrapped, "_tiled_depth_camera"):
+                self._unwrapped._tiled_depth_camera = None
             if hasattr(self._unwrapped, "_tiled_camera_view_prim_path"):
                 self._unwrapped._tiled_camera_view_prim_path = None
             if self._depth_shm_writer is not None:
@@ -3471,8 +3637,10 @@ def main() -> None:
         import isaaclab.sim as sim_utils
         try:
             from yopo_drone.env.drone_env_editor import initialize_scene_from_editor
+            from yopo_drone.env.random_forest_scene import add_random_forest_scene, build_random_forest_cfg_from_args
         except ImportError:
             from e2e_drone.env.drone_env_editor import initialize_scene_from_editor
+            from e2e_drone.env.random_forest_scene import add_random_forest_scene, build_random_forest_cfg_from_args
 
         initialize_scene_from_editor(
             sim_utils=sim_utils,
@@ -3482,12 +3650,21 @@ def main() -> None:
             add_lights=not args_cli.disable_env_editor_lights,
             add_ground=not args_cli.disable_env_editor_ground,
         )
+        forest_summary = None
+        if args_cli.add_random_forest:
+            forest_args = argparse.Namespace(**vars(args_cli))
+            forest_args.world_path = args_cli.env_editor_world_path
+            forest_args.robot_init_pos = (0.0, 0.0, 1.0)
+            forest_cfg = build_random_forest_cfg_from_args(forest_args)
+            forest_summary = add_random_forest_scene(sim_utils=sim_utils, cfg=forest_cfg)
         sim_utils.update_stage()
+        random_forest_text = "off" if forest_summary is None else f"on({forest_summary['tree_count']} trees)"
         print(
             "[Info] Initialized stage from drone_env_editor helpers:"
             f" world_path={args_cli.env_editor_world_path},"
             f" ground={'off' if args_cli.disable_env_editor_ground else 'on'},"
-            f" lights={'off' if args_cli.disable_env_editor_lights else 'on'}"
+            f" lights={'off' if args_cli.disable_env_editor_lights else 'on'},"
+            f" random_forest={random_forest_text}"
         )
 
     @hydra_task_config(args_cli.task, "")

@@ -20,6 +20,10 @@ ENV DOCKER_USER_HOME=${DOCKER_USER_HOME_ARG}
 # Optional: allow toggling pytorch reinstall (default OFF)
 ARG REINSTALL_TORCH="0"
 ENV REINSTALL_TORCH=${REINSTALL_TORCH}
+ARG TORCH_VERSION="2.7.0"
+ARG TORCHVISION_VERSION="0.22.0"
+ARG TORCHAUDIO_VERSION="2.7.0"
+ARG PYTORCH_INDEX_URL="https://download.pytorch.org/whl/cu128"
 
 ENV LANG=C.UTF-8
 ENV DEBIAN_FRONTEND=noninteractive
@@ -35,6 +39,7 @@ RUN --mount=type=cache,target=/var/cache/apt \
     git \
     gnupg \
     libglib2.0-0 \
+    libgfortran5 \
     lsb-release \
     ncurses-term \
     software-properties-common && \
@@ -108,12 +113,45 @@ RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
     ${ISAACLAB_PATH}/isaaclab.sh -p -m pip install --no-build-isolation --no-cache-dir \
     flatdict==4.0.1
 
+# YOPO network training/inference dependencies migrated from YOPO_local/YOPO/docker.
+# Keep Isaac Sim / Isaac Lab's torch stack and only layer the missing packages on top.
+COPY ./yopo-network-requirements.txt /tmp/yopo-network-requirements.txt
+RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
+    ${ISAACLAB_PATH}/isaaclab.sh -p -m pip install --no-cache-dir \
+    -r /tmp/yopo-network-requirements.txt && \
+    rm -f /tmp/yopo-network-requirements.txt
+
+# Isaac Sim's bundled torch package can expose broken vendored packaging
+# imports in some local images. Point those imports to the external
+# `packaging` module installed above.
+RUN python3 - <<'PY'
+from pathlib import Path
+
+root = Path("/workspace/isaaclab/_isaac_sim/exts/omni.isaac.ml_archive/pip_prebundle/torch")
+targets = [
+    root / "torch_version.py",
+    root / "_dynamo" / "decorators.py",
+    root / "utils" / "_cxx_pytree.py",
+    root / "utils" / "_pytree.py",
+    root / "utils" / "tensorboard" / "__init__.py",
+]
+old = "torch._vendor.packaging.version"
+new = "packaging.version"
+for path in targets:
+    text = path.read_text()
+    if old in text:
+        path.write_text(text.replace(old, new))
+PY
+
 # Optional: do NOT override Isaac Sim / Isaac Lab prebundled torch by default.
 # Enable only if you know you need it: --build-arg REINSTALL_TORCH=1
 RUN --mount=type=cache,target=${DOCKER_USER_HOME}/.cache/pip \
     if [ "${REINSTALL_TORCH}" = "1" ]; then \
       ${ISAACLAB_PATH}/isaaclab.sh -p -m pip install --no-cache-dir \
-        torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 || true ; \
+        --index-url ${PYTORCH_INDEX_URL} \
+        torch==${TORCH_VERSION} \
+        torchvision==${TORCHVISION_VERSION} \
+        torchaudio==${TORCHAUDIO_VERSION} || true ; \
     else \
       echo "Skip reinstalling torch (using Isaac Sim/Isaac Lab prebundled torch)"; \
     fi

@@ -14,15 +14,23 @@ Example:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import contextlib
 import sys
 import time
 from pathlib import Path
 from typing import Any, Iterable
 
+import numpy as np
+
 with contextlib.suppress(ModuleNotFoundError):
     import isaacsim  # noqa: F401
 
+from yopo_drone.env.random_forest_scene import (
+    add_random_forest_arguments,
+    add_random_forest_scene,
+    build_random_forest_cfg_from_args,
+)
 from yopo_drone.utils.robot_model import DEFAULT_ROBOT_URDF
 
 try:
@@ -172,9 +180,9 @@ def _enable_viewport_grid() -> None:
 
 def _add_ground(world_path: str, *, sim_utils: Any) -> None:
     # Prefer Isaac Lab's built-in ground plane spawner for compatibility/stability.
-    ground_cfg = sim_utils.GroundPlaneCfg(size=(500.0, 500.0), color=(0.0, 0.0, 0.0))
+    ground_cfg = sim_utils.GroundPlaneCfg(size=(500.0, 500.0), color=(0.24, 0.16, 0.10))
     ground_cfg.func(f"{world_path}/Ground", ground_cfg, translation=(0.0, 0.0, 0.0))
-    print(f"Ground plane added at {world_path}/Ground (500x500).", flush=True)
+    print(f"Ground plane added at {world_path}/Ground (500x500, deep brown soil tone).", flush=True)
 
 
 def _add_world_origin_frame(world_path: str) -> None:
@@ -256,18 +264,28 @@ def _add_tiled_camera(
     sim_utils: Any,
     TiledCamera: Any,
     TiledCameraCfg: Any,
+    prim_path: str | None = None,
+    data_types: Iterable[str] | None = None,
+    clip_near: float | None = None,
+    clip_far: float | None = None,
+    log_name: str = "Tiled camera",
 ) -> Any:
+    resolved_prim_path = str(args.tiled_cam_prim_path if prim_path is None else prim_path)
+    resolved_data_types = list(data_types) if data_types is not None else ["rgb", "depth"]
     tiled_camera_cfg = TiledCameraCfg(
-        prim_path=args.tiled_cam_prim_path,
+        prim_path=resolved_prim_path,
         update_period=float(args.tiled_cam_update_period),
         width=int(args.tiled_cam_width),
         height=int(args.tiled_cam_height),
-        data_types=["rgb", "depth"],
+        data_types=resolved_data_types,
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=float(args.tiled_cam_focal_length),
             focus_distance=float(args.tiled_cam_focus_distance),
             horizontal_aperture=float(args.tiled_cam_horizontal_aperture),
-            clipping_range=(float(args.tiled_cam_clip_near), float(args.tiled_cam_clip_far)),
+            clipping_range=(
+                float(args.tiled_cam_clip_near if clip_near is None else clip_near),
+                float(args.tiled_cam_clip_far if clip_far is None else clip_far),
+            ),
         ),
         offset=TiledCameraCfg.OffsetCfg(
             pos=tuple(float(v) for v in args.tiled_cam_offset_pos),
@@ -277,15 +295,30 @@ def _add_tiled_camera(
     )
     tiled_camera = TiledCamera(tiled_camera_cfg)
     print(
-        "Tiled camera created:"
-        f" prim={args.tiled_cam_prim_path},"
-        " data_types=['rgb','depth'],"
+        f"{log_name} created:"
+        f" prim={resolved_prim_path},"
+        f" data_types={resolved_data_types},"
         f" resolution=({args.tiled_cam_width}x{args.tiled_cam_height})"
     , flush=True)
     return tiled_camera
 
 
-def _warm_up_tiled_camera(tiled_camera: Any, sim: Any, *, sim_dt: float, warmup_steps: int) -> None:
+def _derive_depth_tiled_camera_prim_path(prim_path: str) -> str:
+    prim_path = str(prim_path).rstrip("/")
+    tail = prim_path.rsplit("/", 1)[-1]
+    if tail == "TiledCamera":
+        return prim_path[: -len("TiledCamera")] + "TiledDepthCamera"
+    return f"{prim_path}_Depth"
+
+
+def _warm_up_tiled_camera(
+    tiled_camera: Any,
+    sim: Any,
+    *,
+    sim_dt: float,
+    warmup_steps: int,
+    log_name: str = "Tiled camera",
+) -> None:
     for _ in range(max(int(warmup_steps), 1)):
         sim.step()
     tiled_camera.update(sim_dt)
@@ -296,7 +329,114 @@ def _warm_up_tiled_camera(tiled_camera: Any, sim: Any, *, sim_dt: float, warmup_
         depth = tiled_camera.data.output.get("distance_to_image_plane")
     rgb_shape = tuple(rgb.shape) if rgb is not None else None
     depth_shape = tuple(depth.shape) if depth is not None else None
-    print(f"Tiled camera data ready: rgb_shape={rgb_shape}, depth_shape={depth_shape}", flush=True)
+    print(f"{log_name} data ready: rgb_shape={rgb_shape}, depth_shape={depth_shape}", flush=True)
+
+
+def _schedule_tiled_camera_left_stack_dock(
+    *,
+    ui_module: Any,
+    rgb_window: Any | None = None,
+    depth_window: Any | None = None,
+    rgb_window_name: str = "Tiled Camera",
+) -> Any:
+    if rgb_window is None and depth_window is None:
+        return None
+    left_dock_ratio = 0.36
+    depth_window_name = str(getattr(depth_window, "title", "")) if depth_window is not None else ""
+
+    def _dock_window(window_obj: Any, *, target_name: str, target_handle: Any, dock_position: Any, ratio: float) -> bool:
+        if window_obj is None:
+            return False
+        with contextlib.suppress(Exception):
+            if target_handle is not None:
+                window_obj.dock_in(target_handle, dock_position, float(ratio))
+                return True
+        with contextlib.suppress(Exception):
+            dock_in_window = getattr(window_obj, "dock_in_window", None)
+            if callable(dock_in_window):
+                if bool(dock_in_window(str(target_name), dock_position, float(ratio))):
+                    return True
+        return False
+
+    async def _dock_windows() -> None:
+        try:
+            import omni.kit.app
+
+            app = omni.kit.app.get_app()
+            await app.next_update_async()
+            await app.next_update_async()
+
+            completed = False
+            attempts = 0
+            rgb_state = "off"
+            depth_state = "off"
+            for attempts in range(1, 13):
+                viewport_window = ui_module.Workspace.get_window("Viewport")
+                rgb_handle = ui_module.Workspace.get_window(str(rgb_window_name))
+                rgb_target = rgb_window if rgb_window is not None else rgb_handle
+                if rgb_target is not None and viewport_window is not None:
+                    _dock_window(
+                        rgb_target,
+                        target_name="Viewport",
+                        target_handle=viewport_window,
+                        dock_position=ui_module.DockPosition.LEFT,
+                        ratio=left_dock_ratio,
+                    )
+
+                await app.next_update_async()
+
+                depth_target = depth_window
+                rgb_handle = ui_module.Workspace.get_window(str(rgb_window_name))
+                if depth_target is not None:
+                    if rgb_handle is not None:
+                        _dock_window(
+                            depth_target,
+                            target_name=str(rgb_window_name),
+                            target_handle=rgb_handle,
+                            dock_position=ui_module.DockPosition.BOTTOM,
+                            ratio=0.5,
+                        )
+                    elif viewport_window is not None:
+                        _dock_window(
+                            depth_target,
+                            target_name="Viewport",
+                            target_handle=viewport_window,
+                            dock_position=ui_module.DockPosition.LEFT,
+                            ratio=left_dock_ratio,
+                        )
+
+                await app.next_update_async()
+
+                rgb_dock_id = int(getattr(ui_module.Workspace.get_window(str(rgb_window_name)), "dock_id", 0))
+                depth_dock_id = int(getattr(ui_module.Workspace.get_window(depth_window_name), "dock_id", 0)) if depth_window_name else 0
+                rgb_state = "off" if rgb_window is None and rgb_handle is None else ("docked" if rgb_dock_id > 0 else "floating")
+                depth_state = "off" if depth_window is None else ("docked" if depth_dock_id > 0 else "floating")
+                if (rgb_window is None or rgb_dock_id > 0) and (depth_window is None or depth_dock_id > 0):
+                    completed = True
+                    break
+
+            if completed:
+                print(
+                    "Docked tiled camera windows:"
+                    f" rgb={rgb_state},"
+                    f" depth={depth_state},"
+                    f" attempts={attempts},"
+                    " layout='left_stack'",
+                    flush=True,
+                )
+            else:
+                print(
+                    "Tiled camera dock warning:"
+                    f" rgb={rgb_state},"
+                    f" depth={depth_state},"
+                    f" attempts={attempts},"
+                    " layout='left_stack_incomplete'",
+                    flush=True,
+                )
+        except Exception as exc:
+            print(f"Tiled camera dock warning: {exc!r}", flush=True)
+
+    return asyncio.ensure_future(_dock_windows())
 
 
 def _attach_tiled_camera_inset(args: argparse.Namespace) -> Any:
@@ -311,57 +451,206 @@ def _attach_tiled_camera_inset(args: argparse.Namespace) -> Any:
         from omni.kit.viewport.window import ViewportWindow
 
         inset_window = ViewportWindow(
-            name="Tiled Camera",
+            name=str(args.tiled_cam_inset_window_name),
             width=int(args.tiled_cam_inset_width),
             height=int(args.tiled_cam_inset_height),
+            dockPreference=ui.DockPreference.LEFT_BOTTOM,
         )
-        # ViewportWindow visibility is method-based in Kit API.
         with contextlib.suppress(Exception):
             inset_window.visible(True)
         with contextlib.suppress(Exception):
             inset_window.visible = True
         inset_window.viewport_api.camera_path = Sdf.Path(str(args.tiled_cam_prim_path))
-
-        def _to_int(value: Any, default: int) -> int:
-            with contextlib.suppress(Exception):
-                return int(value)
-            with contextlib.suppress(Exception):
-                return int(float(value))
-            return default
-
-        def _place_inset(window_obj: Any) -> None:
-            """Place inset above Render Settings window; fallback to default coords."""
-            render_settings_window = ui.Workspace.get_window("Render Settings")
-            if render_settings_window is not None:
-                inset_h = int(args.tiled_cam_inset_height)
-                margin = 12
-
-                rs_x = _to_int(getattr(render_settings_window, "position_x", 0), 0)
-                rs_y = _to_int(getattr(render_settings_window, "position_y", 0), 0)
-                target_x = rs_x
-                target_y = max(0, rs_y - inset_h - margin)
-
-                window_obj.position_x = target_x
-                window_obj.position_y = target_y
-                return
-
-            window_obj.position_x = int(args.tiled_cam_inset_pos_x)
-            window_obj.position_y = int(args.tiled_cam_inset_pos_y)
-
-        # Initial placement and continuous lock (prevents manual dragging).
-        _place_inset(inset_window)
+        inset_window._yopo_dock_task = _schedule_tiled_camera_left_stack_dock(
+            ui_module=ui,
+            rgb_window=inset_window,
+            rgb_window_name=str(args.tiled_cam_inset_window_name),
+        )
 
         print(
             "Tiled camera inset attached:"
-            " window='Tiled Camera',"
+            f" window='{args.tiled_cam_inset_window_name}',"
             f" size=({args.tiled_cam_inset_width}x{args.tiled_cam_inset_height}),"
             f" camera={args.tiled_cam_prim_path},"
-            " anchor='above Render Settings'"
+            " dock='scheduled',"
+            " layout='left_stack_rgb_top'"
         , flush=True)
         return inset_window
     except Exception as exc:
         print(f"Tiled camera inset warning: {exc!r}", flush=True)
         return None
+
+
+class _UiDepthWindowHandle:
+    def __init__(
+        self,
+        *,
+        ui_module: Any,
+        window_name: str,
+        width: int,
+        height: int,
+        pos_x: int,
+        pos_y: int,
+    ) -> None:
+        self._ui = ui_module
+        self._window_name = str(window_name)
+        self._width = int(width)
+        self._height = int(height)
+        self._window = None
+        self._provider = None
+        self._ensure_window()
+
+    @property
+    def window(self) -> Any:
+        return self._window
+
+    def _ensure_window(self) -> None:
+        if self._window is not None and self._provider is not None:
+            with contextlib.suppress(Exception):
+                self._window.visible = True
+            return
+
+        self._provider = self._ui.ByteImageProvider()
+        self._window = self._ui.Window(
+            self._window_name,
+            width=self._width,
+            height=self._height,
+            visible=True,
+            padding_x=0,
+            padding_y=0,
+            dockPreference=self._ui.DockPreference.LEFT_BOTTOM,
+        )
+        with self._window.frame:
+            with self._ui.ZStack(style={"margin": 0, "padding": 0}):
+                self._ui.ImageWithProvider(self._provider)
+
+    def show(self, image: np.ndarray) -> None:
+        self._ensure_window()
+        rgba_image = _to_rgba_uint8_image(image)
+        self._provider.set_bytes_data(rgba_image.flatten().data, [rgba_image.shape[1], rgba_image.shape[0]])
+
+    def destroy(self) -> None:
+        if self._window is not None:
+            with contextlib.suppress(Exception):
+                self._window.visible = False
+            with contextlib.suppress(Exception):
+                self._window.destroy()
+        self._window = None
+        self._provider = None
+
+
+def _attach_tiled_camera_depth_inset(args: argparse.Namespace, tiled_camera: Any) -> Any:
+    """Create a GUI depth window for the tiled camera."""
+    if args.headless or args.disable_tiled_camera or args.disable_tiled_camera_depth_inset:
+        return None
+    if not _is_gui_enabled():
+        return None
+    try:
+        import omni.ui as ui
+
+        depth_window = _UiDepthWindowHandle(
+            ui_module=ui,
+            window_name=args.tiled_cam_depth_inset_window_name,
+            width=int(args.tiled_cam_depth_inset_width),
+            height=int(args.tiled_cam_depth_inset_height),
+            pos_x=int(args.tiled_cam_depth_inset_pos_x),
+            pos_y=int(args.tiled_cam_depth_inset_pos_y),
+        )
+        state: dict[str, Any] = {
+            "window": depth_window,
+            "last_update_time": 0.0,
+        }
+        state["dock_task"] = _schedule_tiled_camera_left_stack_dock(
+            ui_module=ui,
+            depth_window=depth_window.window,
+            rgb_window_name=str(args.tiled_cam_inset_window_name),
+        )
+        _update_tiled_camera_depth_inset(args, tiled_camera, state, force=True)
+        print(
+            "Tiled camera depth inset attached:"
+            f" window='{args.tiled_cam_depth_inset_window_name}',"
+            f" size=({args.tiled_cam_depth_inset_width}x{args.tiled_cam_depth_inset_height}),"
+            f" clip=({args.tiled_cam_depth_vis_near},{args.tiled_cam_depth_vis_far}),"
+            " dock='scheduled',"
+            " layout='left_stack_depth_bottom'"
+        , flush=True)
+        return state
+    except Exception as exc:
+        print(f"Tiled camera depth inset warning: {exc!r}", flush=True)
+        return None
+
+
+def _update_tiled_camera_depth_inset(
+    args: argparse.Namespace,
+    tiled_camera: Any,
+    depth_inset_state: Any,
+    *,
+    force: bool = False,
+) -> None:
+    if depth_inset_state is None:
+        return
+    update_interval = max(float(args.tiled_cam_depth_inset_update_interval), 0.0)
+    now = time.monotonic()
+    if not force and now - float(depth_inset_state["last_update_time"]) < update_interval:
+        return
+
+    depth = tiled_camera.data.output.get("depth")
+    if depth is None:
+        depth = tiled_camera.data.output.get("distance_to_image_plane")
+    if depth is None:
+        return
+
+    depth_np = _depth_tensor_to_numpy(depth)
+    near = float(args.tiled_cam_depth_vis_near)
+    far = float(args.tiled_cam_depth_vis_far)
+    grayscale_image = _colorize_depth_for_ui(
+        depth_np,
+        near=near,
+        far=far,
+    )
+    depth_inset_state["window"].show(grayscale_image)
+    depth_inset_state["last_update_time"] = now
+
+
+def _depth_tensor_to_numpy(depth_tensor: Any) -> np.ndarray:
+    depth_np = depth_tensor[0, ..., 0].detach().cpu().numpy()
+    return np.asarray(depth_np, dtype=np.float32)
+
+
+def _colorize_depth_for_ui(depth_np: np.ndarray, *, near: float, far: float) -> np.ndarray:
+    near = max(float(near), 0.0)
+    far = max(float(far), near + 1e-6)
+    sanitized_depth = np.asarray(depth_np, dtype=np.float32).copy()
+    # Treat "no return" pixels as very far so sky/background render white.
+    no_return_mask = ~np.isfinite(sanitized_depth) | (sanitized_depth <= 0.0)
+    sanitized_depth[no_return_mask] = far
+
+    clipped = np.clip(sanitized_depth, near, far)
+    normalized = (clipped - near) / (far - near)
+    normalized = np.clip(normalized, 0.0, 1.0)
+    return (normalized * 255.0).astype(np.uint8)
+
+
+def _to_rgba_uint8_image(image: np.ndarray) -> np.ndarray:
+    image_uint8 = np.asarray(image, dtype=np.uint8)
+    if image_uint8.ndim == 2:
+        return np.dstack(
+            (
+                image_uint8,
+                image_uint8,
+                image_uint8,
+                np.full(image_uint8.shape, 255, dtype=np.uint8),
+            )
+        )
+    if image_uint8.ndim == 3 and image_uint8.shape[2] == 1:
+        gray = image_uint8[..., 0]
+        return np.dstack((gray, gray, gray, np.full(gray.shape, 255, dtype=np.uint8)))
+    if image_uint8.ndim == 3 and image_uint8.shape[2] == 3:
+        alpha = np.full(image_uint8.shape[:2] + (1,), 255, dtype=np.uint8)
+        return np.concatenate((image_uint8, alpha), axis=2)
+    if image_uint8.ndim == 3 and image_uint8.shape[2] == 4:
+        return image_uint8
+    raise ValueError(f"Unsupported image shape for UI depth inset: {image_uint8.shape}")
 
 
 def _build_argparser() -> argparse.ArgumentParser:
@@ -411,6 +700,8 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--robot-max-linear-velocity", type=float, default=1000.0)
     parser.add_argument("--robot-max-angular-velocity", type=float, default=1000.0)
 
+    add_random_forest_arguments(parser)
+
     parser.add_argument("--disable-tiled-camera", action="store_true")
     parser.add_argument("--tiled-cam-prim-path", type=str, default="/World/Robot/base_link/TiledCamera")
     parser.add_argument(
@@ -439,6 +730,8 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--tiled-cam-horizontal-aperture", type=float, default=20.955)
     parser.add_argument("--tiled-cam-clip-near", type=float, default=0.05)
     parser.add_argument("--tiled-cam-clip-far", type=float, default=200.0)
+    parser.add_argument("--tiled-cam-depth-clip-near", type=float, default=0.05)
+    parser.add_argument("--tiled-cam-depth-clip-far", type=float, default=20.0)
     parser.add_argument("--tiled-cam-warmup-steps", type=int, default=6)
     parser.add_argument(
         "--disable-tiled-camera-inset",
@@ -450,6 +743,34 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--tiled-cam-inset-height", type=int, default=240)
     parser.add_argument("--tiled-cam-inset-pos-x", type=int, default=60)
     parser.add_argument("--tiled-cam-inset-pos-y", type=int, default=120)
+    parser.add_argument(
+        "--disable-tiled-camera-depth-inset",
+        action="store_true",
+        help="Disable the GUI depth inset for the tiled camera.",
+    )
+    parser.add_argument("--tiled-cam-depth-inset-window-name", type=str, default="Tiled Camera Depth")
+    parser.add_argument("--tiled-cam-depth-inset-width", type=int, default=360)
+    parser.add_argument("--tiled-cam-depth-inset-height", type=int, default=240)
+    parser.add_argument("--tiled-cam-depth-inset-pos-x", type=int, default=1520)
+    parser.add_argument("--tiled-cam-depth-inset-pos-y", type=int, default=60)
+    parser.add_argument(
+        "--tiled-cam-depth-inset-update-interval",
+        type=float,
+        default=0.1,
+        help="Seconds between GUI depth inset refreshes.",
+    )
+    parser.add_argument(
+        "--tiled-cam-depth-vis-near",
+        type=float,
+        default=0.0,
+        help="Near depth used for grayscale mapping in the GUI depth inset.",
+    )
+    parser.add_argument(
+        "--tiled-cam-depth-vis-far",
+        type=float,
+        default=20.0,
+        help="Far depth used for grayscale mapping in the GUI depth inset.",
+    )
 
     return parser
 
@@ -579,14 +900,25 @@ def main() -> int:
         parser.error("--tiled-cam-width/--tiled-cam-height must be positive integers")
     if args.robot_contact_offset < args.robot_rest_offset:
         parser.error("--robot-contact-offset must be >= --robot-rest-offset")
+    if args.random_forest_prim_path and not args.random_forest_prim_path.startswith("/"):
+        parser.error("--random-forest-prim-path must be an absolute USD path like /World/Obstacles/RandomForest")
 
     robot_urdf_path = _resolve_project_path(args.robot_urdf)
     if not robot_urdf_path.is_file():
         parser.error(f"--robot-urdf file not found: {robot_urdf_path}")
 
+    forest_cfg = None
+    if args.add_random_forest:
+        try:
+            forest_cfg = build_random_forest_cfg_from_args(args)
+        except ValueError as exc:
+            parser.error(str(exc))
+
     simulation_app, _app_owner = _create_simulation_app(headless=bool(args.headless))
     sim = None
     inset_window = None
+    depth_inset_state = None
+    forest_summary = None
 
     try:
         _ensure_pxr_imported()
@@ -603,15 +935,31 @@ def main() -> int:
         _add_lights(args.world_path, sim_utils=sim_utils)
         _add_ground(args.world_path, sim_utils=sim_utils)
         _add_world_origin_frame(args.world_path)
+        if forest_cfg is not None:
+            forest_summary = add_random_forest_scene(sim_utils=sim_utils, cfg=forest_cfg)
         _add_robot_from_urdf(args, robot_urdf_path, sim_utils=sim_utils)
 
         tiled_camera = None
+        depth_tiled_camera = None
         if not args.disable_tiled_camera:
             tiled_camera = _add_tiled_camera(
                 args,
                 sim_utils=sim_utils,
                 TiledCamera=TiledCamera,
                 TiledCameraCfg=TiledCameraCfg,
+                data_types=["rgb"],
+                log_name="Tiled RGB camera",
+            )
+            depth_tiled_camera = _add_tiled_camera(
+                args,
+                sim_utils=sim_utils,
+                TiledCamera=TiledCamera,
+                TiledCameraCfg=TiledCameraCfg,
+                prim_path=_derive_depth_tiled_camera_prim_path(args.tiled_cam_prim_path),
+                data_types=["depth"],
+                clip_near=float(args.tiled_cam_depth_clip_near),
+                clip_far=float(args.tiled_cam_depth_clip_far),
+                log_name="Tiled depth camera",
             )
 
         sim_utils.update_stage()
@@ -623,17 +971,28 @@ def main() -> int:
                 sim,
                 sim_dt=float(args.sim_dt),
                 warmup_steps=int(args.tiled_cam_warmup_steps),
+                log_name="Tiled RGB camera",
+            )
+            _warm_up_tiled_camera(
+                depth_tiled_camera,
+                sim,
+                sim_dt=float(args.sim_dt),
+                warmup_steps=int(args.tiled_cam_warmup_steps),
+                log_name="Tiled depth camera",
             )
             inset_window = _attach_tiled_camera_inset(args)
+            depth_inset_state = _attach_tiled_camera_depth_inset(args, depth_tiled_camera)
 
         _set_overview_camera(sim)
         _enable_viewport_grid()
         print("Scene updated in current Isaac Lab stage.", flush=True)
+        random_forest_summary = "off" if forest_summary is None else f"on({forest_summary['tree_count']} trees)"
 
         print(
             "Summary:"
             f" robot_urdf={robot_urdf_path},"
             f" robot_init_pos={tuple(args.robot_init_pos)},"
+            f" random_forest={random_forest_summary},"
             f" tiled_camera={'off' if args.disable_tiled_camera else f'on({args.tiled_cam_width}x{args.tiled_cam_height})'}"
         , flush=True)
 
@@ -651,6 +1010,11 @@ def main() -> int:
                 while simulation_app.is_running():
                     try:
                         sim.step()
+                        if tiled_camera is not None:
+                            tiled_camera.update(float(args.sim_dt))
+                        if depth_tiled_camera is not None and depth_inset_state is not None:
+                            depth_tiled_camera.update(float(args.sim_dt))
+                            _update_tiled_camera_depth_inset(args, depth_tiled_camera, depth_inset_state)
                     except Exception as exc:
                         print(f"Keep-alive loop warning: {exc!r}", flush=True)
                         time.sleep(0.2)
@@ -664,6 +1028,9 @@ def main() -> int:
         if inset_window is not None:
             with contextlib.suppress(Exception):
                 inset_window.destroy()
+        if depth_inset_state is not None:
+            with contextlib.suppress(Exception):
+                depth_inset_state["window"].destroy()
 
         if args.headless or args.close_after_build:
             simulation_app.close(wait_for_replicator=False, skip_cleanup=True)
