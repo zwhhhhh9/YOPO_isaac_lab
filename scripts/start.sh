@@ -24,6 +24,8 @@ export ISAACLAB_INSTALL_MODE="${ISAACLAB_INSTALL_MODE:-none}"
 echo "ISAACLAB_INSTALL_MODE=${ISAACLAB_INSTALL_MODE}"
 
 COMPOSE_STARTED=0
+WINDOW_MONITOR_PID=""
+MAIN_SCRIPT_PID="$$"
 
 require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -94,6 +96,10 @@ create_shared_volumes() {
 
 cleanup() {
     trap - EXIT INT TERM
+    if [ -n "${WINDOW_MONITOR_PID:-}" ]; then
+        kill "$WINDOW_MONITOR_PID" >/dev/null 2>&1 || true
+        WINDOW_MONITOR_PID=""
+    fi
     if [ "$COMPOSE_STARTED" -eq 1 ]; then
         echo "Cleaning up container: $PROJECT_NAME"
         docker compose -f "$DOCKER_COMPOSE_FILE" -p "$PROJECT_NAME" down || true
@@ -126,6 +132,138 @@ show_help() {
     echo "  ./scripts/start.sh --ros2-node yopo_drone/tasks/hover_initial_position.py"
     trap - EXIT INT TERM
     exit 0
+}
+
+list_isaac_frame_ids() {
+    if ! command -v xwininfo >/dev/null 2>&1; then
+        return
+    fi
+    xwininfo -root -tree 2>/dev/null | awk '/"Isaac Sim/ && /mutter-x11-frames/ {print $1}'
+}
+
+current_window_width() {
+    local window_id="$1"
+    xwininfo -id "$window_id" 2>/dev/null | awk '/Width:/ {print $2; exit}'
+}
+
+current_window_geometry() {
+    local window_id="$1"
+    xwininfo -id "$window_id" 2>/dev/null | awk '
+        /Absolute upper-left X:/ {x=$4}
+        /Absolute upper-left Y:/ {y=$4}
+        /Width:/ {w=$2}
+        /Height:/ {h=$2}
+        END {
+            if (x != "" && y != "" && w != "" && h != "") {
+                printf "%s %s %s %s\n", x, y, w, h
+            }
+        }
+    '
+}
+
+find_pointer_device_id() {
+    if ! command -v xinput >/dev/null 2>&1; then
+        return
+    fi
+    xinput list --short 2>/dev/null | awk '/Virtual core pointer/ {for (i=1; i<=NF; ++i) if ($i ~ /^id=/) {sub(/^id=/, "", $i); print $i; exit}}'
+}
+
+start_isaac_close_monitor() {
+    if [ -z "${DISPLAY:-}" ]; then
+        return
+    fi
+    if ! command -v xinput >/dev/null 2>&1 || ! command -v xwininfo >/dev/null 2>&1; then
+        return
+    fi
+
+    local existing_ids=""
+    local pointer_id=""
+    existing_ids="$(list_isaac_frame_ids | tr '\n' ' ')"
+    pointer_id="$(find_pointer_device_id)"
+    [ -n "$pointer_id" ] || return
+
+    (
+        local frame_id=""
+        local poll_count=0
+        while kill -0 "$MAIN_SCRIPT_PID" >/dev/null 2>&1; do
+            while read -r candidate_id; do
+                [ -z "$candidate_id" ] && continue
+                if [[ " $existing_ids " != *" $candidate_id "* ]]; then
+                    frame_id="$candidate_id"
+                    break 2
+                fi
+            done < <(list_isaac_frame_ids)
+            poll_count=$((poll_count + 1))
+            if [ "$poll_count" -ge 180 ]; then
+                exit 0
+            fi
+            sleep 1
+        done
+
+        [ -n "$frame_id" ] || exit 0
+        echo "Watching Isaac close button on host window frame: $frame_id"
+
+        local event_kind=""
+        local button_detail=""
+        local root_x=""
+        local root_y=""
+        local xinput_cmd=(xinput test-xi2 --root "$pointer_id")
+        if command -v stdbuf >/dev/null 2>&1; then
+            xinput_cmd=(stdbuf -oL -eL "${xinput_cmd[@]}")
+        fi
+
+        "${xinput_cmd[@]}" 2>/dev/null | while IFS= read -r line; do
+            if [[ "$line" == *"ButtonRelease"* ]]; then
+                event_kind="ButtonRelease"
+                button_detail=""
+                root_x=""
+                root_y=""
+                continue
+            fi
+
+            if [[ "$line" == *"ButtonPress"* ]]; then
+                event_kind="ButtonPress"
+                button_detail=""
+                root_x=""
+                root_y=""
+                continue
+            fi
+
+            if [[ "$line" =~ detail:[[:space:]]+([0-9]+) ]]; then
+                button_detail="${BASH_REMATCH[1]}"
+                continue
+            fi
+
+            if [[ "$line" =~ root:[[:space:]]+([0-9]+(\.[0-9]+)?)/([0-9]+(\.[0-9]+)?) ]]; then
+                root_x="${BASH_REMATCH[1]%.*}"
+                root_y="${BASH_REMATCH[3]%.*}"
+            fi
+
+            if [ "$event_kind" != "ButtonRelease" ] || [ "$button_detail" != "1" ] || [ -z "$root_x" ] || [ -z "$root_y" ]; then
+                continue
+            fi
+
+            geometry="$(current_window_geometry "$frame_id")"
+            [ -n "$geometry" ] || continue
+            read -r frame_x frame_y frame_width frame_height <<< "$geometry"
+
+            click_root_x="$root_x"
+            click_root_y="$root_y"
+            local_x=$((click_root_x - frame_x))
+            local_y=$((click_root_y - frame_y))
+            event_kind=""
+            button_detail=""
+            root_x=""
+            root_y=""
+
+            if [ "$local_x" -ge $((frame_width - 96)) ] && [ "$local_x" -le "$frame_width" ] && [ "$local_y" -ge 0 ] && [ "$local_y" -le 52 ]; then
+                echo "Isaac close button click detected at root=(${click_root_x},${click_root_y}) local=(${local_x},${local_y}). Removing container for project: $PROJECT_NAME"
+                docker compose -f "$DOCKER_COMPOSE_FILE" -p "$PROJECT_NAME" down >/dev/null 2>&1 || true
+                break
+            fi
+        done
+    ) &
+    WINDOW_MONITOR_PID=$!
 }
 
 stop_all_containers() {
@@ -215,4 +353,5 @@ mkdir -p "$BASE_DIR/logs"
 
 echo "Starting new container with project name: $PROJECT_NAME"
 COMPOSE_STARTED=1
+start_isaac_close_monitor
 docker compose -f "$DOCKER_COMPOSE_FILE" -p "$PROJECT_NAME" up

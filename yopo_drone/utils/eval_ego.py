@@ -970,6 +970,116 @@ def main() -> None:
     except ImportError:
         from e2e_drone import tasks
     import gymnasium as gym
+    try:
+        import carb.windowing as _carb_windowing_mod
+        import omni.appwindow as _omni_appwindow_mod
+        import omni.kit.app as _omni_kit_app_mod
+    except ImportError as exc:
+        _carb_windowing_mod = None
+        _omni_appwindow_mod = None
+        _omni_kit_app_mod = None
+        print(f"[Warn] Main window close detection disabled: {exc}")
+
+    class _MainWindowCloseWatcher:
+        def __init__(self) -> None:
+            self._windowing = (
+                _carb_windowing_mod.acquire_windowing_interface() if _carb_windowing_mod is not None else None
+            )
+            self._kit_app = _omni_kit_app_mod.get_app() if _omni_kit_app_mod is not None else None
+            self._app_window = None
+            self._main_window = None
+            self._close_subscription = None
+            self._shutdown_subscription = None
+            self._requested = False
+            self._warned = False
+            self._logged = False
+            self._ensure_setup()
+
+        def _warn_once(self, message: str) -> None:
+            if self._warned:
+                return
+            print(f"[Warn] {message}")
+            self._warned = True
+
+        def _resolve_window(self) -> None:
+            if self._app_window is None and _omni_appwindow_mod is not None:
+                try:
+                    self._app_window = _omni_appwindow_mod.get_default_app_window()
+                except Exception as exc:
+                    self._warn_once(f"Failed to access Isaac main window: {exc}")
+                    self._app_window = None
+            if self._main_window is None and self._app_window is not None:
+                try:
+                    self._main_window = self._app_window.get_window()
+                except Exception as exc:
+                    self._warn_once(f"Failed to access native Isaac window handle: {exc}")
+                    self._main_window = None
+
+        def _request_shutdown(self, reason: str) -> bool:
+            if self._requested:
+                return True
+            self._requested = True
+            if not self._logged:
+                print(f"[Info] Main window close requested ({reason}). Shutting down Isaac app.")
+                self._logged = True
+            if self._main_window is not None and self._windowing is not None:
+                with contextlib.suppress(Exception):
+                    self._windowing.set_window_should_close(self._main_window, False)
+            if self._kit_app is not None:
+                with contextlib.suppress(Exception):
+                    self._kit_app.post_uncancellable_quit(0)
+            return True
+
+        def _on_window_close_event(self, _event) -> None:
+            self._request_shutdown("event")
+
+        def _on_shutdown_event(self, _event) -> None:
+            self._requested = True
+
+        def _ensure_setup(self) -> None:
+            if self._kit_app is None:
+                return
+            self._resolve_window()
+            if self._shutdown_subscription is None:
+                with contextlib.suppress(Exception):
+                    self._shutdown_subscription = self._kit_app.get_shutdown_event_stream().create_subscription_to_pop(
+                        self._on_shutdown_event,
+                        name="YOPO shutdown watcher",
+                    )
+            if self._close_subscription is None and self._app_window is not None:
+                with contextlib.suppress(Exception):
+                    self._close_subscription = self._app_window.get_window_close_event_stream().create_subscription_to_pop(
+                        self._on_window_close_event,
+                        name="YOPO main window close watcher",
+                    )
+
+        def poll(self) -> bool:
+            if self._requested:
+                return True
+            self._ensure_setup()
+            if self._windowing is None or self._kit_app is None:
+                return False
+            if self._main_window is None:
+                self._resolve_window()
+                if self._main_window is None:
+                    return False
+            try:
+                should_close = bool(self._windowing.should_window_close(self._main_window))
+            except Exception as exc:
+                self._warn_once(f"Main window close polling failed: {exc}")
+                return False
+            if should_close:
+                return self._request_shutdown("poll")
+            return False
+
+        def close(self) -> None:
+            self._close_subscription = None
+            self._shutdown_subscription = None
+
+    main_window_close_watcher = _MainWindowCloseWatcher()
+
+    def _main_window_close_requested() -> bool:
+        return main_window_close_watcher.poll()
 
     def _tiled_camera_enabled() -> bool:
         return not bool(getattr(args_cli, "disable_tiled_camera", False))
@@ -1328,6 +1438,16 @@ def main() -> None:
             self._path_actual_points: list[list[float]] = []
             self._path_actual_stride_counter = 0
             self._tiled_camera_update_failed = False
+            self._shutdown_requested = False
+            self._window_close_detection_warned = False
+            self._window_close_logged = False
+            self._kit_app = _omni_kit_app_mod.get_app() if _omni_kit_app_mod is not None else None
+            self._windowing = (
+                _carb_windowing_mod.acquire_windowing_interface() if _carb_windowing_mod is not None else None
+            )
+            self._app_window = None
+            self._main_window = None
+            self._resolve_main_window_handle()
 
             self._enable_rate_ctrl = False
             att_p_gain = self._resolve_vector_param(args_cli.att_p_gain, LEGACY_ATT_P_GAIN, "att_p_gain")
@@ -2645,6 +2765,8 @@ def main() -> None:
             render_interval = 1 / 30.0
             next_step = self._current_sim_time
             while self._sim_app.is_running() and (not self._ros_enabled or rclpy.ok()):
+                if self._check_main_window_close_request():
+                    break
                 if self._ros_enabled:
                     rclpy.spin_once(self, timeout_sec=0.0)
                 if self._use_ros2_sidecar:
@@ -2662,9 +2784,62 @@ def main() -> None:
                 #     next_step = sim_time + render_interval
                 if (not self._has_received_position_command) or (self._current_sim_time - self._last_cmd_time > 1.0):
                     self._apply_default_command()
+                if self._check_main_window_close_request():
+                    break
                 # print(f"Simulation time: {time.time() - start_time}")
                 if self._reset_log_done:
                     break
+
+        def _resolve_main_window_handle(self) -> None:
+            if self._main_window is not None or self._windowing is None or _omni_appwindow_mod is None:
+                return
+            try:
+                self._app_window = _omni_appwindow_mod.get_default_app_window()
+            except Exception as exc:
+                if not self._window_close_detection_warned:
+                    self.get_logger().warning(f"Failed to access Isaac main window: {exc}")
+                    self._window_close_detection_warned = True
+                return
+            if self._app_window is None:
+                return
+            try:
+                self._main_window = self._app_window.get_window()
+            except Exception as exc:
+                if not self._window_close_detection_warned:
+                    self.get_logger().warning(f"Failed to access native Isaac window handle: {exc}")
+                    self._window_close_detection_warned = True
+                self._main_window = None
+
+        def _check_main_window_close_request(self) -> bool:
+            if self._shutdown_requested:
+                return True
+            if _main_window_close_requested():
+                self._shutdown_requested = True
+                return True
+            if self._kit_app is None or self._windowing is None:
+                return False
+            if self._main_window is None:
+                self._resolve_main_window_handle()
+                if self._main_window is None:
+                    return False
+            try:
+                should_close = bool(self._windowing.should_window_close(self._main_window))
+            except Exception as exc:
+                if not self._window_close_detection_warned:
+                    self.get_logger().warning(f"Main window close polling failed: {exc}")
+                    self._window_close_detection_warned = True
+                return False
+            if not should_close:
+                return False
+            self._shutdown_requested = True
+            if not self._window_close_logged:
+                self.get_logger().info("Main window close requested. Shutting down Isaac app.")
+                self._window_close_logged = True
+            with contextlib.suppress(Exception):
+                self._windowing.set_window_should_close(self._main_window, False)
+            with contextlib.suppress(Exception):
+                self._kit_app.post_uncancellable_quit(0)
+            return True
 
         def _run_startup_hover_settle(self) -> None:
             if self._startup_hover_settle_steps <= 0 or self._reset_pos is None:
@@ -2673,9 +2848,13 @@ def main() -> None:
                 f"Running startup hover settle for {self._startup_hover_settle_steps} steps before enabling telemetry."
             )
             for _ in range(self._startup_hover_settle_steps):
+                if self._check_main_window_close_request():
+                    return
                 self._cache_state()
                 self._set_hover_command()
                 self._run_controller_step(count_sim_step=False)
+                if self._check_main_window_close_request():
+                    return
             self._cache_state()
             if self._last_state is not None:
                 settle_state = np.array(self._last_state, dtype=np.float32)
@@ -2704,7 +2883,11 @@ def main() -> None:
             self._unwrapped._sim_step_counter = 0
 
         def _step_env(self) -> None:
+            if self._check_main_window_close_request():
+                return
             self._run_controller_step(count_sim_step=True)
+            if self._check_main_window_close_request():
+                return
 
             self._unwrapped.episode_length_buf += 1
             self._unwrapped.common_step_counter += 1
@@ -2779,6 +2962,8 @@ def main() -> None:
                 actions = self._actions.to(self._device)
 
                 for _ in range(self._unwrapped.cfg.decimation):
+                    if self._check_main_window_close_request():
+                        return
                     cur_state = self._robot.data.root_state_w.clone()
                     if self._enable_rate_ctrl:
                         _, _, motor_speeds, info = self._controller.compute_control(
@@ -3582,7 +3767,7 @@ def main() -> None:
     # =================================================================================
 
     def _apply_editor_scene_deployment_tuning(env_cfg) -> None:
-        if args_cli.disable_env_editor_scene_init:
+        if args_cli.disable_env_editor_scene_init or _main_window_close_requested():
             return
 
         adjustments: list[str] = []
@@ -3632,7 +3817,7 @@ def main() -> None:
             print("[Info] Applied deployment reset tuning: " + ", ".join(adjustments))
 
     def _maybe_initialize_editor_scene() -> None:
-        if args_cli.disable_env_editor_scene_init:
+        if args_cli.disable_env_editor_scene_init or _main_window_close_requested():
             return
         import isaaclab.sim as sim_utils
         try:
@@ -3650,6 +3835,8 @@ def main() -> None:
             add_lights=not args_cli.disable_env_editor_lights,
             add_ground=not args_cli.disable_env_editor_ground,
         )
+        if _main_window_close_requested():
+            return
         forest_summary = None
         if args_cli.add_random_forest:
             forest_args = argparse.Namespace(**vars(args_cli))
@@ -3657,6 +3844,8 @@ def main() -> None:
             forest_args.robot_init_pos = (0.0, 0.0, 1.0)
             forest_cfg = build_random_forest_cfg_from_args(forest_args)
             forest_summary = add_random_forest_scene(sim_utils=sim_utils, cfg=forest_cfg)
+            if _main_window_close_requested():
+                return
         sim_utils.update_stage()
         random_forest_text = "off" if forest_summary is None else f"on({forest_summary['tree_count']} trees)"
         print(
@@ -3669,6 +3858,8 @@ def main() -> None:
 
     @hydra_task_config(args_cli.task, "")
     def _launch(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg) -> None:
+        if _main_window_close_requested():
+            return
         if args_cli.num_envs is not None:
             env_cfg.scene.num_envs = args_cli.num_envs
         if args_cli.device:
@@ -3681,12 +3872,25 @@ def main() -> None:
             env_cfg.sim.use_fabric = False
 
         _apply_editor_scene_deployment_tuning(env_cfg)
+        if _main_window_close_requested():
+            return
         _maybe_initialize_editor_scene()
+        if _main_window_close_requested():
+            return
         env = gym.make(args_cli.task, cfg=env_cfg)
+        if _main_window_close_requested():
+            env.close()
+            return
         if isinstance(env.unwrapped, DirectMARLEnv):
             env = multi_agent_to_single_agent(env)
         env.reset()
+        if _main_window_close_requested():
+            env.close()
+            return
         _maybe_create_eval_tiled_camera(env)
+        if _main_window_close_requested():
+            env.close()
+            return
 
         bridge: Optional[EnvRosBridge] = None
         rclpy_inited = False
@@ -3727,8 +3931,12 @@ def main() -> None:
         env.close()
 
     # 执行启动
-    _launch()
-    simulation_app.close()
+    try:
+        _launch()
+    finally:
+        with contextlib.suppress(Exception):
+            main_window_close_watcher.close()
+        simulation_app.close()
 
 
 if __name__ == "__main__":
