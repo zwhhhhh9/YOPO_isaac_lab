@@ -8,6 +8,7 @@ Fix: Added missing publishers and methods for flatness/control debug.
 from __future__ import annotations
 
 import argparse
+import colorsys
 import contextlib
 import csv
 from dataclasses import dataclass
@@ -506,6 +507,113 @@ def _parse_arguments() -> argparse.Namespace:
         type=float,
         default=0.5,
         help="Adaptive yaw-rate factor used by the internal quintic-goal trajectory.",
+    )
+    parser.add_argument(
+        "--yopo_policy_checkpoint",
+        type=str,
+        default="",
+        help="Trained YOPO checkpoint used for internal receding-horizon policy evaluation.",
+    )
+    parser.add_argument(
+        "--yopo_policy_dataset_dir",
+        type=str,
+        default="",
+        help="Dataset directory used to recover YOPO config defaults and sample random mission goals.",
+    )
+    parser.add_argument(
+        "--yopo_policy_initial_hover_s",
+        type=float,
+        default=0.0,
+        help="Seconds to hover at the startup position before starting the internal YOPO policy task.",
+    )
+    parser.add_argument(
+        "--yopo_policy_replan_dt",
+        type=float,
+        default=0.05,
+        help="Seconds between successive YOPO policy replans.",
+    )
+    parser.add_argument(
+        "--yopo_policy_velocity",
+        type=float,
+        default=None,
+        help=(
+            "Original-YOPO testing velocity parameter. When set, YOPO runtime rescales max speed, "
+            "max acceleration, and segment time using the same ratio logic as the original code."
+        ),
+    )
+    parser.add_argument(
+        "--yopo_policy_goal_reach_tolerance",
+        type=float,
+        default=2.0,
+        help="Distance threshold in meters for switching YOPO into the final goal-docking quintic. Original YOPO uses 5 m; this repo now defaults to 2 m.",
+    )
+    parser.add_argument(
+        "--yopo_policy_goal_settle_speed",
+        type=float,
+        default=0.35,
+        help="Speed threshold in m/s for considering the random YOPO goal settled.",
+    )
+    parser.add_argument(
+        "--yopo_policy_goal_trunk_clearance",
+        type=float,
+        default=1.0,
+        help="Minimum extra planar clearance from random-forest trunk surfaces when sampling a random YOPO mission goal.",
+    )
+    parser.add_argument(
+        "--yopo_policy_min_goal_distance",
+        type=float,
+        default=6.0,
+        help="Minimum distance in meters between startup position and the sampled YOPO mission goal.",
+    )
+    parser.add_argument(
+        "--yopo_policy_goal_xyz",
+        type=float,
+        nargs=3,
+        default=None,
+        metavar=("X", "Y", "Z"),
+        help="Optional fixed world-frame mission goal for YOPO policy evaluation. When omitted, a random goal is sampled.",
+    )
+    parser.add_argument(
+        "--yopo_policy_random_goal_seed",
+        type=int,
+        default=0,
+        help="Random seed used when sampling a mission goal from the dataset poses.",
+    )
+    parser.add_argument(
+        "--yopo_policy_max_depth_dist",
+        type=float,
+        default=20.0,
+        help="Depth clipping/normalization distance used before feeding frames to the YOPO policy.",
+    )
+    parser.add_argument(
+        "--yopo_policy_camera_pitch_deg",
+        type=float,
+        default=None,
+        help="Camera pitch in degrees used when rotating velocity/goal into the YOPO camera frame. Defaults to dataset metadata when omitted.",
+    )
+    parser.add_argument(
+        "--yopo_policy_ground_z",
+        type=float,
+        default=0.0,
+        help="Ground-plane height used to reject YOPO candidate trajectories that dip below the floor.",
+    )
+    parser.add_argument(
+        "--yopo_policy_floor_clearance",
+        type=float,
+        default=0.30,
+        help="Minimum clearance above the ground plane that YOPO candidate trajectories must maintain.",
+    )
+    parser.add_argument(
+        "--yopo_policy_ceiling_z",
+        type=float,
+        default=4.0,
+        help="Maximum world-frame height allowed for YOPO candidate trajectories and commanded references.",
+    )
+    parser.add_argument(
+        "--yopo_policy_compact_backbone",
+        action="store_true",
+        default=False,
+        help="Load the compact YOPO backbone for policy inference.",
     )
     parser.add_argument(
         "--rolling_figure8",
@@ -1384,6 +1492,115 @@ def main() -> None:
             self._quintic_last_sample_time = 0.0
             self._quintic_last_yaw = 0.0
             self._quintic_terminal_logged = False
+            self._yopo_policy_checkpoint = str(args_cli.yopo_policy_checkpoint).strip()
+            self._yopo_policy_dataset_dir = str(args_cli.yopo_policy_dataset_dir).strip()
+            self._yopo_policy_enabled = bool(self._yopo_policy_checkpoint)
+            self._yopo_policy_initial_hover_s = max(0.0, float(args_cli.yopo_policy_initial_hover_s))
+            self._yopo_policy_replan_dt = max(self._physics_dt, float(args_cli.yopo_policy_replan_dt))
+            self._yopo_policy_velocity = (
+                None if args_cli.yopo_policy_velocity is None else max(1e-3, float(args_cli.yopo_policy_velocity))
+            )
+            self._yopo_policy_goal_reach_tolerance = max(1e-3, float(args_cli.yopo_policy_goal_reach_tolerance))
+            self._yopo_policy_goal_settle_speed = max(0.0, float(args_cli.yopo_policy_goal_settle_speed))
+            self._yopo_policy_goal_trunk_clearance = max(0.0, float(args_cli.yopo_policy_goal_trunk_clearance))
+            self._yopo_policy_min_goal_distance = max(0.0, float(args_cli.yopo_policy_min_goal_distance))
+            self._yopo_policy_fixed_goal = (
+                None
+                if args_cli.yopo_policy_goal_xyz is None
+                else np.array(args_cli.yopo_policy_goal_xyz, dtype=np.float32).reshape(3)
+            )
+            self._yopo_policy_random_goal_seed = int(args_cli.yopo_policy_random_goal_seed)
+            self._yopo_policy_max_depth_dist = max(1e-3, float(args_cli.yopo_policy_max_depth_dist))
+            self._yopo_policy_camera_pitch_deg = (
+                None if args_cli.yopo_policy_camera_pitch_deg is None else float(args_cli.yopo_policy_camera_pitch_deg)
+            )
+            self._yopo_policy_ground_z = float(args_cli.yopo_policy_ground_z)
+            self._yopo_policy_floor_clearance = max(0.0, float(args_cli.yopo_policy_floor_clearance))
+            self._yopo_policy_ceiling_z = max(
+                self._yopo_policy_ground_z + self._yopo_policy_floor_clearance,
+                float(args_cli.yopo_policy_ceiling_z),
+            )
+            self._yopo_policy_goal_xy_bounds: Optional[tuple[float, float, float, float]] = None
+            self._yopo_policy_goal_trunk_obstacles = np.zeros((0, 3), dtype=np.float32)
+            if bool(args_cli.add_random_forest):
+                total_span_x = float(args_cli.random_forest_size_x) * (2 * int(args_cli.random_forest_tile_radius) + 1)
+                total_span_y = float(args_cli.random_forest_size_y) * (2 * int(args_cli.random_forest_tile_radius) + 1)
+                self._yopo_policy_goal_xy_bounds = (
+                    -0.5 * total_span_x,
+                    0.5 * total_span_x,
+                    -0.5 * total_span_y,
+                    0.5 * total_span_y,
+                )
+                try:
+                    from yopo_drone.env.random_forest_scene import (
+                        build_random_forest_cfg_from_args,
+                        generate_random_forest_trunk_obstacles,
+                    )
+                except ImportError:
+                    from e2e_drone.env.random_forest_scene import (
+                        build_random_forest_cfg_from_args,
+                        generate_random_forest_trunk_obstacles,
+                    )
+                forest_args = argparse.Namespace(**vars(args_cli))
+                forest_args.world_path = args_cli.env_editor_world_path
+                forest_args.robot_init_pos = (0.0, 0.0, 1.0)
+                forest_cfg = build_random_forest_cfg_from_args(forest_args)
+                self._yopo_policy_goal_trunk_obstacles = np.asarray(
+                    [
+                        [obstacle.x, obstacle.y, obstacle.radius]
+                        for obstacle in generate_random_forest_trunk_obstacles(forest_cfg)
+                    ],
+                    dtype=np.float32,
+                ).reshape(-1, 3)
+            self._yopo_policy_runtime = None
+            self._yopo_goal: Optional[np.ndarray] = None
+            self._yopo_policy_goal_reached = False
+            self._yopo_policy_phase = "idle"
+            self._yopo_policy_start_time = 0.0
+            self._yopo_policy_last_plan_time = float("-inf")
+            self._yopo_policy_last_sample_time = 0.0
+            self._yopo_policy_last_yaw = 0.0
+            self._yopo_policy_segment_score = float("nan")
+            self._yopo_policy_action_id = -1
+            self._yopo_trajectory: Optional[QuinticTrajectory] = None
+            self._yopo_desired_pos: Optional[np.ndarray] = None
+            self._yopo_desired_vel = np.zeros(3, dtype=np.float32)
+            self._yopo_desired_acc = np.zeros(3, dtype=np.float32)
+            self._yopo_policy_speed_cmd = 0.0
+            self._yopo_policy_terminal_wait_logged = False
+            self._yopo_policy_max_speed = float("inf")
+            self._yopo_policy_max_acceleration = float("inf")
+            self._yopo_policy_segment_duration = float("nan")
+            self._yopo_policy_config_source = "disabled"
+            if self._yopo_policy_enabled:
+                from yopo_drone.network.models.test import YopoPolicyRuntime
+
+                dataset_dir_arg = self._yopo_policy_dataset_dir if self._yopo_policy_dataset_dir else None
+                self._yopo_policy_runtime = YopoPolicyRuntime(
+                    checkpoint_path=self._yopo_policy_checkpoint,
+                    dataset_dir=dataset_dir_arg,
+                    device=self._device,
+                    compact_backbone=bool(args_cli.yopo_policy_compact_backbone),
+                    max_depth_dist=self._yopo_policy_max_depth_dist,
+                    camera_pitch_deg=self._yopo_policy_camera_pitch_deg,
+                    velocity=self._yopo_policy_velocity,
+                    goal_seed=self._yopo_policy_random_goal_seed,
+                    goal_xy_bounds=self._yopo_policy_goal_xy_bounds,
+                    goal_trunk_obstacles=self._yopo_policy_goal_trunk_obstacles,
+                    goal_trunk_clearance=self._yopo_policy_goal_trunk_clearance,
+                )
+                self._yopo_policy_max_speed = float(self._yopo_policy_runtime.max_speed)
+                self._yopo_policy_max_acceleration = float(self._yopo_policy_runtime.max_acceleration)
+                self._yopo_policy_segment_duration = float(self._yopo_policy_runtime.segment_duration)
+                self._yopo_policy_config_source = str(self._yopo_policy_runtime.config_source)
+                if not self._yopo_policy_runtime.camera_pitch_matches_dataset:
+                    dataset_camera_pitch_deg = self._yopo_policy_runtime.dataset_camera_pitch_deg
+                    if dataset_camera_pitch_deg is not None:
+                        self.get_logger().warning(
+                            "Explicit YOPO camera pitch overrides dataset metadata: "
+                            f"effective={self._yopo_policy_runtime.camera_pitch_deg:.2f} deg, "
+                            f"dataset={dataset_camera_pitch_deg:.2f} deg."
+                        )
             self._rolling_figure8 = bool(args_cli.rolling_figure8)
             self._figure8_length = max(1e-3, float(args_cli.figure8_length))
             self._figure8_width = max(1e-3, float(args_cli.figure8_width))
@@ -1427,6 +1644,7 @@ def main() -> None:
             self._path_reference_color = [0.10, 0.85, 1.00, 1.00]
             self._path_actual_color = [1.00, 0.35, 0.15, 1.00]
             self._path_preview_color = [0.95, 0.92, 0.20, 1.00]
+            self._path_best_color = [0.05, 0.05, 0.05, 1.00]
             self._path_preview_width = max(self._path_reference_width + 2.0, self._path_actual_width * 0.65)
             self._path_reference_radius = max(0.003, 0.0025 * self._path_reference_width)
             self._path_actual_radius = max(0.004, 0.0025 * self._path_actual_width)
@@ -1435,8 +1653,17 @@ def main() -> None:
             self._path_segment_visualizer = None
             self._path_reference_points: list[list[float]] = []
             self._path_preview_points: list[list[float]] = []
+            self._path_candidate_points: list[list[list[float]]] = []
+            self._path_candidate_colors: list[list[float]] = []
+            self._path_candidate_widths: list[float] = []
+            self._path_candidate_limit = 15
             self._path_actual_points: list[list[float]] = []
             self._path_actual_stride_counter = 0
+            self._goal_visualizer = None
+            self._goal_visual_height = 10.0
+            self._goal_visual_radius = 0.10
+            self._goal_visual_debug_color = [1.0, 0.0, 0.0, 1.0]
+            self._goal_visual_debug_width = max(2.0, self._path_reference_width + 1.0)
             self._tiled_camera_update_failed = False
             self._shutdown_requested = False
             self._window_close_detection_warned = False
@@ -1519,15 +1746,18 @@ def main() -> None:
             self._cache_state()
             self._setup_rotor_spin_visual()
             self._setup_path_visualization()
+            self._setup_goal_visualization()
             self._refresh_hold_target(self._last_state, reason="startup", apply_command=True, log_update=True)
             self._run_startup_hover_settle()
             self._log_controller_model(ctrl_model)
             self._log_controller_tuning()
             self._log_auto_target_goal_plan()
             self._log_quintic_goal_plan()
+            self._log_yopo_policy_plan()
             self._log_rolling_figure8_plan()
             self._restart_auto_target_goal_task(reason="startup")
             self._restart_quintic_goal_task(reason="startup")
+            self._restart_yopo_policy_task(reason="startup")
             self._restart_rolling_figure8_task(reason="startup")
 
             if self._ros_enabled:
@@ -1754,9 +1984,87 @@ def main() -> None:
         def _reset_path_visualization(self) -> None:
             self._path_reference_points.clear()
             self._path_preview_points.clear()
+            self._path_candidate_points.clear()
+            self._path_candidate_colors.clear()
+            self._path_candidate_widths.clear()
             self._path_actual_points.clear()
             self._path_actual_stride_counter = 0
             self._clear_path_visualization()
+
+        def _setup_goal_visualization(self) -> None:
+            if bool(getattr(args_cli, "headless", False)):
+                return
+            try:
+                import isaaclab.sim as sim_utils
+                from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+            except Exception as exc:
+                self.get_logger().warning(f"Goal marker visualization disabled: {exc}")
+                return
+            try:
+                marker_cfg = VisualizationMarkersCfg(
+                    prim_path="/World/Visuals/EvalGoalColumn",
+                    markers={
+                        "goal_column": sim_utils.CylinderCfg(
+                            radius=float(self._goal_visual_radius),
+                            height=float(self._goal_visual_height),
+                            axis="Z",
+                            visual_material=sim_utils.PreviewSurfaceCfg(
+                                diffuse_color=(1.0, 0.0, 0.0),
+                                roughness=0.85,
+                            ),
+                        )
+                    },
+                )
+                self._goal_visualizer = VisualizationMarkers(marker_cfg)
+                self._update_goal_visualization(None)
+            except Exception as exc:
+                self._goal_visualizer = None
+                self.get_logger().warning(f"Goal marker visualization disabled: {exc}")
+
+        def _goal_visual_position(self) -> Optional[np.ndarray]:
+            if self._yopo_policy_enabled and self._yopo_goal is not None:
+                return np.array(self._yopo_goal, copy=True)
+            if self._rolling_figure8:
+                if self._figure8_endpoint_state is not None:
+                    return np.array(self._figure8_endpoint_state.position, copy=True)
+                if self._figure8_center is not None:
+                    return np.array(self._figure8_center, copy=True)
+            if self._quintic_goal is not None:
+                return np.array(self._quintic_goal, copy=True)
+            if self._auto_target_goal is not None:
+                return np.array(self._auto_target_goal, copy=True)
+            return None
+
+        def _update_goal_visualization(self, position: Optional[np.ndarray]) -> None:
+            if self._goal_visualizer is None:
+                if self._path_draw_interface is not None:
+                    self._draw_path_visualization()
+                return
+            if position is None:
+                with contextlib.suppress(Exception):
+                    self._goal_visualizer.set_visibility(False)
+                if self._path_draw_interface is not None:
+                    self._draw_path_visualization()
+                return
+            raw_pos = np.asarray(position, dtype=np.float32).reshape(3)
+            pos = np.array(
+                [[
+                    float(raw_pos[0]),
+                    float(raw_pos[1]),
+                    float(self._yopo_policy_ground_z + 0.5 * self._goal_visual_height),
+                ]],
+                dtype=np.float32,
+            )
+            with contextlib.suppress(Exception):
+                self._goal_visualizer.set_visibility(True)
+            with contextlib.suppress(Exception):
+                self._goal_visualizer.visualize(
+                    translations=pos,
+                    orientations=np.array([[1.0, 0.0, 0.0, 0.0]], dtype=np.float32),
+                    marker_indices=np.array([0], dtype=np.int32),
+                )
+            if self._path_draw_interface is not None:
+                self._draw_path_visualization()
 
         @staticmethod
         def _quat_from_z_axis_to_vector(direction: np.ndarray) -> np.ndarray:
@@ -1806,29 +2114,536 @@ def main() -> None:
             marker_indices = np.full((translations.shape[0],), marker_index, dtype=np.int32)
             return translations, orientations, scales, marker_indices
 
+        def _sample_quintic_points(
+            self,
+            trajectory: QuinticTrajectory,
+            *,
+            duration: float,
+            initial_yaw: float,
+        ) -> list[list[float]]:
+            sample_dt = max(float(duration) / max(self._path_reference_sample_count - 1, 1), 1e-3)
+            last_yaw = float(initial_yaw)
+            points: list[list[float]] = []
+            for t in np.linspace(0.0, float(duration), self._path_reference_sample_count):
+                sample = trajectory.sample(float(t), last_yaw=last_yaw, dt=sample_dt)
+                last_yaw = float(sample.yaw)
+                points.append([float(sample.position[0]), float(sample.position[1]), float(sample.position[2])])
+            return points
+
+        @staticmethod
+        def _path_candidate_color(rank: int, total: int, *, selected: bool = False) -> list[float]:
+            if selected:
+                return [0.05, 0.05, 0.05, 1.00]
+            if total <= 1:
+                hue = 1.0 / 3.0
+                alpha = 0.95
+            else:
+                ratio = float(rank + 1) / float(total)
+                hue = (1.0 - ratio) / 3.0
+                alpha = 0.95 - 0.35 * ratio
+            red, green, blue = colorsys.hsv_to_rgb(hue, 0.90, 1.00)
+            return [float(red), float(green), float(blue), float(max(alpha, 0.45))]
+
+        def _rebuild_yopo_candidate_visual(
+            self,
+            *,
+            start_pos: np.ndarray,
+            start_vel: np.ndarray,
+            start_acc: np.ndarray,
+            plan,
+            selected_action_id: int | None = None,
+        ) -> None:
+            self._path_candidate_points.clear()
+            self._path_candidate_colors.clear()
+            self._path_candidate_widths.clear()
+            if not self._enable_path_visualization:
+                return
+            candidate_segments = tuple(getattr(plan, "candidate_segments", ())[: self._path_candidate_limit])
+            if not candidate_segments:
+                return
+
+            total = len(candidate_segments)
+            initial_yaw = float(self._yopo_policy_last_yaw)
+            for rank, candidate in enumerate(candidate_segments):
+                trajectory = QuinticTrajectory(
+                    start_pos=np.array(start_pos, dtype=np.float64),
+                    start_vel=np.array(start_vel, dtype=np.float64),
+                    start_acc=np.array(start_acc, dtype=np.float64),
+                    goal_pos=np.array(candidate.segment_goal_world, dtype=np.float64),
+                    goal_vel=np.array(candidate.segment_velocity_world, dtype=np.float64),
+                    goal_acc=np.array(candidate.segment_acceleration_world, dtype=np.float64),
+                    duration=float(candidate.segment_duration),
+                    yaw_mode="adaptive",
+                    initial_yaw=initial_yaw,
+                    fixed_yaw=initial_yaw,
+                    max_yaw_rate=self._quintic_max_yaw_rate,
+                )
+                self._path_candidate_points.append(
+                    self._sample_quintic_points(
+                        trajectory,
+                        duration=float(candidate.segment_duration),
+                        initial_yaw=initial_yaw,
+                    )
+                )
+                self._path_candidate_colors.append(
+                    self._path_candidate_color(
+                        rank,
+                        total,
+                        selected=selected_action_id is not None and int(candidate.action_id) == int(selected_action_id),
+                    )
+                )
+                width_ratio = 1.0 - 0.35 * (float(rank) / float(max(total - 1, 1)))
+                self._path_candidate_widths.append(max(1.0, self._path_reference_width * width_ratio))
+
+        def _yopo_floor_limit_z(self) -> float:
+            return float(self._yopo_policy_ground_z + self._yopo_policy_floor_clearance)
+
+        def _yopo_ceiling_limit_z(self) -> float:
+            return float(self._yopo_policy_ceiling_z)
+
+        def _sample_yopo_candidate_metrics(
+            self,
+            *,
+            start_pos: np.ndarray,
+            start_vel: np.ndarray,
+            start_acc: np.ndarray,
+            mission_goal: np.ndarray,
+            candidate,
+        ) -> dict[str, float]:
+            initial_yaw = float(self._yopo_policy_last_yaw)
+            trajectory = QuinticTrajectory(
+                start_pos=np.array(start_pos, dtype=np.float64),
+                start_vel=np.array(start_vel, dtype=np.float64),
+                start_acc=np.array(start_acc, dtype=np.float64),
+                goal_pos=np.array(candidate.segment_goal_world, dtype=np.float64),
+                goal_vel=np.array(candidate.segment_velocity_world, dtype=np.float64),
+                goal_acc=np.array(candidate.segment_acceleration_world, dtype=np.float64),
+                duration=float(candidate.segment_duration),
+                yaw_mode="adaptive",
+                initial_yaw=initial_yaw,
+                fixed_yaw=initial_yaw,
+                max_yaw_rate=self._quintic_max_yaw_rate,
+            )
+            sample_count = max(int(self._path_reference_sample_count), 31)
+            sample_times = np.linspace(0.0, float(candidate.segment_duration), sample_count, dtype=np.float64)
+            sample_dt = max(float(candidate.segment_duration) / max(sample_count - 1, 1), 1e-3)
+            last_yaw = initial_yaw
+            positions = np.zeros((sample_count, 3), dtype=np.float64)
+            for idx, t in enumerate(sample_times):
+                sample = trajectory.sample(float(t), last_yaw=last_yaw, dt=sample_dt)
+                last_yaw = float(sample.yaw)
+                positions[idx] = np.asarray(sample.position, dtype=np.float64)
+
+            goal_world = np.asarray(mission_goal, dtype=np.float64).reshape(3)
+            start_goal_distance = float(np.linalg.norm(goal_world - np.asarray(start_pos, dtype=np.float64)))
+            goal_distances = np.linalg.norm(positions - goal_world[None, :], axis=1)
+            lookahead_time = min(float(self._yopo_policy_replan_dt), float(candidate.segment_duration))
+            lookahead_index = int(np.searchsorted(sample_times, lookahead_time, side="left"))
+            lookahead_index = min(max(lookahead_index, 0), sample_count - 1)
+
+            return {
+                "min_z": float(np.min(positions[:, 2])),
+                "max_z": float(np.max(positions[:, 2])),
+                "lookahead_goal_distance": float(goal_distances[lookahead_index]),
+                "terminal_goal_distance": float(goal_distances[-1]),
+                "best_goal_distance": float(np.min(goal_distances)),
+                "lookahead_progress": start_goal_distance - float(goal_distances[lookahead_index]),
+                "terminal_progress": start_goal_distance - float(goal_distances[-1]),
+            }
+
+        def _select_safe_yopo_candidate(
+            self,
+            *,
+            start_pos: np.ndarray,
+            start_vel: np.ndarray,
+            start_acc: np.ndarray,
+            mission_goal: np.ndarray,
+            plan,
+        ):
+            candidate_segments = tuple(getattr(plan, "candidate_segments", ()))
+            if not candidate_segments:
+                candidate_segments = (plan,)
+
+            floor_limit_z = self._yopo_floor_limit_z()
+            ceiling_limit_z = self._yopo_ceiling_limit_z()
+
+            best_safe_candidate = None
+            best_safe_metrics = None
+            best_safe_rank = None
+
+            best_fallback_candidate = None
+            best_fallback_metrics = None
+            best_fallback_rank = None
+
+            for candidate in candidate_segments:
+                metrics = self._sample_yopo_candidate_metrics(
+                    start_pos=start_pos,
+                    start_vel=start_vel,
+                    start_acc=start_acc,
+                    mission_goal=mission_goal,
+                    candidate=candidate,
+                )
+                floor_violation = max(0.0, floor_limit_z - metrics["min_z"])
+                ceiling_violation = max(0.0, metrics["max_z"] - ceiling_limit_z)
+                total_violation = floor_violation + ceiling_violation
+                progress_margin = 0.02
+                has_positive_progress = (
+                    float(metrics["lookahead_progress"]) > progress_margin
+                    or float(metrics["terminal_progress"]) > progress_margin
+                )
+                progress_rank = 0 if has_positive_progress else 1
+
+                rank = (
+                    progress_rank,
+                    float(metrics["lookahead_goal_distance"]),
+                    float(metrics["terminal_goal_distance"]),
+                    -float(metrics["lookahead_progress"]),
+                    -float(metrics["terminal_progress"]),
+                    float(candidate.score),
+                )
+                if total_violation <= 1e-6:
+                    if best_safe_rank is None or rank < best_safe_rank:
+                        best_safe_candidate = candidate
+                        best_safe_metrics = metrics
+                        best_safe_rank = rank
+                    continue
+
+                fallback_rank = (
+                    float(total_violation),
+                    progress_rank,
+                    float(metrics["lookahead_goal_distance"]),
+                    float(metrics["terminal_goal_distance"]),
+                    -float(metrics["lookahead_progress"]),
+                    -float(metrics["terminal_progress"]),
+                    float(candidate.score),
+                )
+                if best_fallback_rank is None or fallback_rank < best_fallback_rank:
+                    best_fallback_candidate = candidate
+                    best_fallback_metrics = metrics
+                    best_fallback_rank = fallback_rank
+
+            if best_safe_candidate is not None:
+                return best_safe_candidate, best_safe_metrics
+            return best_fallback_candidate, best_fallback_metrics
+
+        def _yopo_pre_docking_terminal_scale(self, capture_goal_distance: float) -> tuple[float, float]:
+            """Softly reduce cruise segment terminal velocity/acceleration near docking."""
+            tol = float(self._yopo_policy_goal_reach_tolerance)
+            slowdown_radius = max(tol + 3.5, 3.0 * tol)
+            if capture_goal_distance >= slowdown_radius:
+                return 1.0, 1.0
+            blend = float(np.clip((capture_goal_distance - tol) / max(slowdown_radius - tol, 1e-6), 0.0, 1.0))
+            vel_scale = 0.20 + 0.80 * blend
+            acc_scale = 0.15 + 0.85 * blend
+            return vel_scale, acc_scale
+
+        def _yopo_goal_hold_tolerance(self) -> float:
+            return float(np.clip(0.25 * self._yopo_policy_goal_reach_tolerance, 0.25, 0.60))
+
+        def _yopo_goal_docking_completion_tolerance(self) -> float:
+            return float(np.clip(0.05 * self._yopo_policy_goal_reach_tolerance, 0.08, 0.18))
+
+        def _yopo_goal_docking_completion_speed(self) -> float:
+            return float(np.clip(0.30 * self._yopo_policy_goal_settle_speed, 0.08, 0.12))
+
+        def _yopo_policy_reference_speed_limit(self, phase: str) -> float:
+            speed_limit = float(self._yopo_policy_max_speed)
+            if phase == "goal_docking":
+                speed_limit = min(speed_limit, self._yopo_goal_docking_speed_limit())
+            return speed_limit
+
+        def _yopo_policy_reference_acc_limit(self) -> float:
+            return float(self._yopo_policy_max_acceleration)
+
+        def _shape_yopo_goal_tracking_reference(
+            self,
+            *,
+            actual_pos: np.ndarray,
+            actual_vel: np.ndarray,
+            desired_pos: np.ndarray,
+            desired_vel: np.ndarray,
+            desired_acc: np.ndarray,
+            phase: str,
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+            pos_cmd = np.array(desired_pos, dtype=np.float32, copy=True)
+            vel_cmd = np.array(desired_vel, dtype=np.float32, copy=True)
+            acc_cmd = np.array(desired_acc, dtype=np.float32, copy=True)
+            actual_speed = float(np.linalg.norm(np.array(actual_vel, dtype=np.float64)))
+
+            speed_cap = self._yopo_policy_reference_speed_limit(phase)
+            if np.isfinite(speed_cap):
+                if actual_speed > speed_cap + 0.05:
+                    speed_cap = max(0.0, speed_cap - 0.75 * (actual_speed - speed_cap))
+                if speed_cap <= 1e-6:
+                    vel_cmd.fill(0.0)
+                else:
+                    vel_cmd = self._clip_vector_norm(vel_cmd, speed_cap)
+
+            acc_cap = self._yopo_policy_reference_acc_limit()
+            if np.isfinite(acc_cap) and acc_cap > 1e-6:
+                acc_cmd = self._clip_vector_norm(acc_cmd, acc_cap)
+
+            if phase != "goal_docking" or self._yopo_goal is None:
+                self._yopo_policy_speed_cmd = float(np.linalg.norm(vel_cmd))
+                return pos_cmd, vel_cmd, acc_cmd
+
+            goal = np.array(self._yopo_goal, dtype=np.float64)
+            pos_now = np.array(actual_pos, dtype=np.float64)
+            vel_now = np.array(actual_vel, dtype=np.float64)
+            goal_delta = goal - pos_now
+            goal_dist = float(np.linalg.norm(goal_delta))
+            completion_tol = self._yopo_goal_docking_completion_tolerance()
+            if goal_dist <= completion_tol:
+                pos_cmd = np.array(goal, dtype=np.float32)
+                vel_cmd.fill(0.0)
+                acc_cmd.fill(0.0)
+                self._yopo_policy_speed_cmd = 0.0
+                return pos_cmd, vel_cmd, acc_cmd
+
+            docking_speed_cap = self._yopo_policy_reference_speed_limit("goal_docking")
+            brake_acc = 1.8
+            braking_speed_cap = math.sqrt(max(0.0, 2.0 * brake_acc * max(goal_dist - completion_tol, 0.0)))
+            speed_cap = min(docking_speed_cap, braking_speed_cap)
+            if actual_speed > speed_cap + 0.05:
+                speed_cap = max(0.0, speed_cap - 0.75 * (actual_speed - speed_cap))
+            if speed_cap <= 1e-6:
+                vel_cmd.fill(0.0)
+            else:
+                vel_cmd = self._clip_vector_norm(vel_cmd, speed_cap)
+            braking_acc_cap = max(0.25, min(self._yopo_policy_reference_acc_limit(), 1.25 * max(speed_cap, actual_speed)))
+            if np.isfinite(braking_acc_cap) and braking_acc_cap > 1e-6:
+                acc_cmd = self._clip_vector_norm(acc_cmd, braking_acc_cap)
+
+            overspeed = max(0.0, actual_speed - speed_cap)
+            base_pos_error = float(np.clip(0.18 + 0.12 * goal_dist, 0.15, 0.45))
+            max_pos_error = max(0.08, base_pos_error - 0.45 * overspeed)
+            pos_error = np.array(pos_cmd, dtype=np.float64) - pos_now
+            pos_cmd = (pos_now + self._clip_vector_norm(pos_error, max_pos_error)).astype(np.float32)
+
+            self._yopo_policy_speed_cmd = float(np.linalg.norm(vel_cmd))
+            return pos_cmd, vel_cmd, acc_cmd
+
+        def _yopo_goal_docking_speed_limit(self) -> float:
+            return min(2.0, float(self._yopo_policy_max_speed))
+
+        def _yopo_execution_speed_limit(self, *, phase: str, actual_pos: np.ndarray) -> float:
+            speed_limit = float(self._yopo_policy_reference_speed_limit(phase))
+            if not np.isfinite(speed_limit):
+                return speed_limit
+
+            if phase == "goal_hold":
+                return min(speed_limit, 0.35)
+
+            if phase != "goal_docking" or self._yopo_goal is None:
+                return speed_limit
+
+            goal = np.array(self._yopo_goal, dtype=np.float64)
+            goal_dist = float(np.linalg.norm(goal - np.array(actual_pos, dtype=np.float64)))
+            completion_tol = self._yopo_goal_docking_completion_tolerance()
+            braking_acc = max(0.35, min(self._yopo_policy_reference_acc_limit(), 1.4))
+            braking_speed_cap = math.sqrt(max(0.0, 2.0 * braking_acc * max(goal_dist - completion_tol, 0.0)))
+            return min(speed_limit, braking_speed_cap)
+
+        def _yopo_feedback_speed_limit(
+            self,
+            *,
+            phase: str,
+            speed_limit: float,
+            goal_dist: float | None,
+        ) -> float:
+            if not np.isfinite(speed_limit):
+                return speed_limit
+            if phase == "goal_hold":
+                return min(speed_limit, 0.20)
+            if phase == "goal_docking":
+                dist = 0.0 if goal_dist is None else float(goal_dist)
+                return min(speed_limit, max(0.15, min(1.00, 0.20 + 0.45 * dist)))
+            return max(0.25, min(speed_limit, 0.60 * speed_limit))
+
+        def _yopo_goal_docking_trigger_distance(self, actual_speed: float) -> float:
+            hold_tol = self._yopo_goal_hold_tolerance()
+            brake_acc = 1.8
+            braking_dist = float(actual_speed) * float(actual_speed) / max(2.0 * brake_acc, 1e-6)
+            return max(self._yopo_policy_goal_reach_tolerance, hold_tol + braking_dist + 1.0)
+
+        def _is_monotone_goal_docking_profile(self, *, dist: float, start_speed: float, duration: float) -> bool:
+            if dist <= 1e-6:
+                return True
+            traj = QuinticTrajectory(
+                start_pos=np.zeros(3, dtype=np.float64),
+                start_vel=np.array([float(start_speed), 0.0, 0.0], dtype=np.float64),
+                start_acc=np.zeros(3, dtype=np.float64),
+                goal_pos=np.array([float(dist), 0.0, 0.0], dtype=np.float64),
+                goal_vel=np.zeros(3, dtype=np.float64),
+                goal_acc=np.zeros(3, dtype=np.float64),
+                duration=float(duration),
+                yaw_mode="fixed",
+                initial_yaw=0.0,
+                fixed_yaw=0.0,
+                max_yaw_rate=0.0,
+            )
+            prev_progress = -1e-6
+            sample_count = max(40, int(math.ceil(float(duration) / max(self._physics_dt, 1e-2))))
+            for t in np.linspace(0.0, float(duration), sample_count + 1):
+                progress = float(traj.sample(float(t), last_yaw=0.0, dt=max(self._physics_dt, 1e-3)).position[0])
+                if progress < prev_progress - 1e-3:
+                    return False
+                if progress > float(dist) + 1e-3:
+                    return False
+                prev_progress = progress
+            return True
+
+        def _active_position_control_profile(
+            self,
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float]:
+            kp = np.array(self._kp, dtype=np.float64)
+            kd = np.array(self._kd, dtype=np.float64)
+            ang_kp = np.array(self._ang_kp, dtype=np.float64)
+            max_bodyrate_fb = float(self._max_bodyrate_fb)
+            max_angle = float(self._max_angle)
+
+            if (
+                (not self._yopo_policy_enabled)
+                or self._yopo_goal is None
+                or self._last_state is None
+                or self._yopo_policy_phase != "goal_docking"
+            ):
+                return kp, kd, ang_kp, max_bodyrate_fb, max_angle
+
+            pos = np.array(self._last_state[:3], dtype=np.float64)
+            dist_goal = float(np.linalg.norm(np.array(self._yopo_goal, dtype=np.float64) - pos))
+            hold_tol = self._yopo_goal_hold_tolerance()
+            if self._yopo_trajectory is not None:
+                elapsed = max(0.0, float(self._current_sim_time) - float(self._yopo_policy_last_plan_time))
+                if elapsed >= float(self._yopo_trajectory.duration):
+                    kp *= np.array([0.65, 0.65, 0.80], dtype=np.float64)
+                    kd *= np.array([1.35, 1.35, 1.15], dtype=np.float64)
+                    ang_kp *= 0.85
+                    max_bodyrate_fb *= 0.70
+                    max_angle = min(max_angle, math.radians(10.0))
+                    return kp, kd, ang_kp, max_bodyrate_fb, max_angle
+            activation_dist = max(self._yopo_policy_goal_reach_tolerance + 1.5, 3.0)
+            blend = float(np.clip((activation_dist - dist_goal) / max(activation_dist - hold_tol, 1e-6), 0.0, 1.0))
+            if blend <= 1e-6:
+                return kp, kd, ang_kp, max_bodyrate_fb, max_angle
+
+            kp *= np.array([1.0 + 1.4 * blend, 1.0 + 1.4 * blend, 1.0 + 0.5 * blend], dtype=np.float64)
+            kd *= np.array([1.0 + 1.1 * blend, 1.0 + 1.1 * blend, 1.0 + 0.4 * blend], dtype=np.float64)
+            ang_kp *= 1.0 + 0.5 * blend
+            max_bodyrate_fb *= 1.0 + 0.8 * blend
+            max_angle = min(math.radians(24.0), max_angle + math.radians(12.0) * blend)
+            return kp, kd, ang_kp, max_bodyrate_fb, max_angle
+
+        def _condition_yopo_goal_docking_entry_state(
+            self,
+            *,
+            pos: np.ndarray,
+            vel: np.ndarray,
+            acc: np.ndarray,
+            goal: np.ndarray,
+        ) -> tuple[np.ndarray, np.ndarray, float, float]:
+            """Keep terminal docking quintic from inheriting an overly aggressive closing state."""
+            start_pos = np.array(pos, dtype=np.float64)
+            start_vel = np.array(vel, dtype=np.float64)
+            start_acc = np.array(acc, dtype=np.float64)
+            goal_vec = np.array(goal, dtype=np.float64) - start_pos
+            dist = float(np.linalg.norm(goal_vec))
+            if dist <= 1e-6:
+                return start_vel, start_acc, 0.0, 0.0
+
+            goal_dir = goal_vec / dist
+            closing_speed = float(np.dot(start_vel, goal_dir))
+            closing_speed_floor = 0.0
+            docking_speed_ceiling = self._yopo_goal_docking_speed_limit()
+            braking_speed_limit = math.sqrt(max(0.0, 2.0 * 2.2 * max(dist - self._yopo_goal_hold_tolerance(), 0.0)))
+            geometric_speed_limit = 0.75 + 0.45 * dist
+            clipped_closing_speed = min(
+                max(closing_speed, closing_speed_floor),
+                docking_speed_ceiling,
+                braking_speed_limit,
+                geometric_speed_limit,
+            )
+            clipped_closing_speed = max(0.0, float(clipped_closing_speed))
+
+            duration = self._estimate_yopo_goal_docking_duration(
+                dist=dist,
+                speed=clipped_closing_speed,
+                closing_speed=clipped_closing_speed,
+            )
+            while clipped_closing_speed > 1e-3 and not self._is_monotone_goal_docking_profile(
+                dist=dist,
+                start_speed=clipped_closing_speed,
+                duration=duration,
+            ):
+                clipped_closing_speed *= 0.85
+                duration = self._estimate_yopo_goal_docking_duration(
+                    dist=dist,
+                    speed=clipped_closing_speed,
+                    closing_speed=clipped_closing_speed,
+                )
+
+            shaped_vel = clipped_closing_speed * goal_dir
+            shaped_acc = np.zeros(3, dtype=np.float64)
+            return shaped_vel, shaped_acc, closing_speed, clipped_closing_speed
+
+        def _clamp_yopo_reference_to_altitude_limits(
+            self,
+            pos_des: np.ndarray,
+            vel_des: np.ndarray,
+            acc_des: np.ndarray,
+            jerk_des: np.ndarray,
+        ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+            pos_cmd = np.array(pos_des, dtype=np.float32, copy=True)
+            vel_cmd = np.array(vel_des, dtype=np.float32, copy=True)
+            acc_cmd = np.array(acc_des, dtype=np.float32, copy=True)
+            jerk_cmd = np.array(jerk_des, dtype=np.float32, copy=True)
+            floor_limit_z = self._yopo_floor_limit_z()
+            ceiling_limit_z = self._yopo_ceiling_limit_z()
+            clamped_z = float(np.clip(float(pos_cmd[2]), floor_limit_z, ceiling_limit_z))
+            if clamped_z >= ceiling_limit_z - 1e-4:
+                vel_cmd[2] = min(float(vel_cmd[2]), 0.0)
+                acc_cmd[2] = min(float(acc_cmd[2]), 0.0)
+                jerk_cmd[2] = min(float(jerk_cmd[2]), 0.0)
+            elif clamped_z <= floor_limit_z + 1e-4:
+                vel_cmd[2] = max(float(vel_cmd[2]), 0.0)
+                acc_cmd[2] = max(float(acc_cmd[2]), 0.0)
+                jerk_cmd[2] = max(float(jerk_cmd[2]), 0.0)
+            pos_cmd[2] = clamped_z
+            return pos_cmd, vel_cmd, acc_cmd, jerk_cmd
+
+        def _preview_path_color(self) -> list[float]:
+            if self._yopo_policy_enabled and self._yopo_trajectory is not None and self._yopo_policy_phase in {"cruise", "goal_docking", "goal_hold"}:
+                return self._path_best_color
+            return self._path_preview_color
+
         def _rebuild_quintic_reference_visual(self) -> None:
             if not self._enable_path_visualization:
                 return
             active_trajectory: Optional[QuinticTrajectory] = None
             active_duration = 0.0
-            if self._rolling_figure8 and self._figure8_trajectory is not None and self._figure8_phase == "cruise":
+            if self._yopo_policy_enabled and self._yopo_trajectory is not None and self._yopo_policy_phase in {"cruise", "goal_docking", "goal_hold"}:
+                active_trajectory = self._yopo_trajectory
+                active_duration = float(self._yopo_trajectory.duration)
+            elif self._rolling_figure8 and self._figure8_trajectory is not None and self._figure8_phase == "cruise":
                 active_trajectory = self._figure8_trajectory
                 active_duration = self._figure8_horizon_s
             elif self._quintic_trajectory is not None:
                 active_trajectory = self._quintic_trajectory
-                active_duration = self._quintic_duration
+                active_duration = float(self._quintic_trajectory.duration)
             if active_trajectory is None:
                 self._path_preview_points.clear()
                 self._draw_path_visualization()
                 return
-            sample_dt = max(active_duration / max(self._path_reference_sample_count - 1, 1), 1e-3)
-            last_yaw = float(self._reset_yaw) if self._reset_yaw is not None else 0.0
-            points: list[list[float]] = []
-            for t in np.linspace(0.0, active_duration, self._path_reference_sample_count):
-                sample = active_trajectory.sample(float(t), last_yaw=last_yaw, dt=sample_dt)
-                last_yaw = float(sample.yaw)
-                points.append([float(sample.position[0]), float(sample.position[1]), float(sample.position[2])])
-            self._path_preview_points = points
+            preview_yaw = (
+                float(self._yopo_policy_last_yaw)
+                if self._yopo_policy_enabled and self._yopo_trajectory is not None and self._yopo_policy_phase in {"cruise", "goal_docking", "goal_hold"}
+                else float(self._reset_yaw) if self._reset_yaw is not None else 0.0
+            )
+            self._path_preview_points = self._sample_quintic_points(
+                active_trajectory,
+                duration=active_duration,
+                initial_yaw=preview_yaw,
+            )
             self._draw_path_visualization()
 
         def _draw_path_visualization(self) -> None:
@@ -1850,14 +2665,38 @@ def main() -> None:
                     line_widths.append(width)
 
             _append_segments(self._path_reference_points, self._path_reference_color, self._path_reference_width)
-            _append_segments(self._path_preview_points, self._path_preview_color, self._path_preview_width)
+            for points, color, width in zip(
+                self._path_candidate_points,
+                self._path_candidate_colors,
+                self._path_candidate_widths,
+            ):
+                _append_segments(points, color, width)
+            _append_segments(self._path_preview_points, self._preview_path_color(), self._path_preview_width)
             _append_segments(self._path_actual_points, self._path_actual_color, self._path_actual_width)
+            goal_pos = self._goal_visual_position()
+            if goal_pos is not None:
+                goal = np.asarray(goal_pos, dtype=np.float32).reshape(3)
+                start_points.append([float(goal[0]), float(goal[1]), float(self._yopo_policy_ground_z)])
+                end_points.append(
+                    [
+                        float(goal[0]),
+                        float(goal[1]),
+                        float(self._yopo_policy_ground_z + self._goal_visual_height),
+                    ]
+                )
+                line_colors.append(list(self._goal_visual_debug_color))
+                line_widths.append(float(self._goal_visual_debug_width))
 
             self._clear_path_visualization()
             if start_points:
                 self._path_draw_interface.draw_lines(start_points, end_points, line_colors, line_widths)
 
         def _path_visualization_active(self) -> bool:
+            yopo_active = (
+                self._yopo_policy_enabled
+                and self._yopo_trajectory is not None
+                and self._yopo_policy_phase in {"cruise", "goal_docking", "goal_hold"}
+            )
             quintic_active = (
                 self._quintic_goal is not None
                 and self._quintic_trajectory is not None
@@ -1869,7 +2708,7 @@ def main() -> None:
                 and self._figure8_phase == "cruise"
             )
             return self._enable_path_visualization and self._path_draw_interface is not None and (
-                quintic_active or rolling_figure8_active
+                yopo_active or quintic_active or rolling_figure8_active
             )
 
         def _append_actual_path_point(self, point: Sequence[float]) -> None:
@@ -2115,6 +2954,41 @@ def main() -> None:
                     "The internal quintic-goal task will take priority."
                 )
 
+        def _log_yopo_policy_plan(self) -> None:
+            if not self._yopo_policy_enabled or self._yopo_policy_runtime is None:
+                return
+            self.get_logger().info(
+                "Configured internal YOPO-policy task: "
+                f"checkpoint={self._yopo_policy_checkpoint}, "
+                f"dataset_dir={self._yopo_policy_runtime.dataset_dir}, "
+                f"startup_hover={self._yopo_policy_initial_hover_s:.2f}s, "
+                f"replan_dt={self._yopo_policy_replan_dt:.2f}s, "
+                f"runtime_speed={self._yopo_policy_max_speed:.2f}m/s, "
+                f"runtime_acc={self._yopo_policy_max_acceleration:.2f}m/s^2, "
+                f"segment_time={self._yopo_policy_segment_duration:.2f}s, "
+                f"config_source={self._yopo_policy_config_source}, "
+                f"goal_tol={self._yopo_policy_goal_reach_tolerance:.2f}m, "
+                f"settle_speed={self._yopo_policy_goal_settle_speed:.2f}m/s, "
+                f"goal_trunk_clearance={self._yopo_policy_goal_trunk_clearance:.2f}m, "
+                f"min_goal_distance={self._yopo_policy_min_goal_distance:.2f}m, "
+                f"camera_pitch={self._yopo_policy_runtime.camera_pitch_deg:.2f}deg"
+                f"[{self._yopo_policy_runtime.camera_pitch_source}], "
+                f"ground_z={self._yopo_policy_ground_z:.2f}m, "
+                f"floor_clearance={self._yopo_policy_floor_clearance:.2f}m, "
+                f"ceiling_z={self._yopo_policy_ceiling_z:.2f}m."
+            )
+            if self._yopo_policy_goal_xy_bounds is not None:
+                min_x, max_x, min_y, max_y = self._yopo_policy_goal_xy_bounds
+                self.get_logger().info(
+                    "YOPO mission-goal bounds limited to random-forest span: "
+                    f"x=[{min_x:.1f}, {max_x:.1f}], y=[{min_y:.1f}, {max_y:.1f}], z=fixed_to_start_altitude."
+                )
+            if self._rolling_figure8 or self._quintic_goal is not None or self._auto_target_goal is not None:
+                self.get_logger().warning(
+                    "Multiple internal missions were configured. "
+                    "The YOPO-policy task will take priority over figure-eight, quintic-goal, and target-goal tasks."
+                )
+
         def _log_rolling_figure8_plan(self) -> None:
             if not self._rolling_figure8 or self._figure8_reference is None:
                 return
@@ -2142,6 +3016,7 @@ def main() -> None:
             self._auto_target_goal_phase = "idle"
             self._auto_target_goal_reached = False
             self._auto_target_goal_speed_cmd = 0.0
+            self._update_goal_visualization(self._goal_visual_position())
             if reason != "startup":
                 self.get_logger().info(
                     "Restarted internal target-goal task "
@@ -2159,12 +3034,36 @@ def main() -> None:
             self._quintic_last_yaw = float(self._reset_yaw) if self._reset_yaw is not None else 0.0
             self._quintic_terminal_logged = False
             self._reset_path_visualization()
+            self._update_goal_visualization(self._goal_visual_position())
             if reason != "startup":
                 self.get_logger().info(
                     "Restarted internal quintic-goal task "
                     f"after {reason}: goal=({self._quintic_goal[0]:.3f}, "
                     f"{self._quintic_goal[1]:.3f}, {self._quintic_goal[2]:.3f})."
                 )
+
+        def _restart_yopo_policy_task(self, *, reason: str) -> None:
+            if not self._yopo_policy_enabled:
+                return
+            self._yopo_goal = None
+            self._yopo_policy_goal_reached = False
+            self._yopo_policy_phase = "idle"
+            self._yopo_policy_start_time = float(self._current_sim_time)
+            self._yopo_policy_last_plan_time = float("-inf")
+            self._yopo_policy_last_sample_time = float(self._current_sim_time)
+            self._yopo_policy_last_yaw = float(self._reset_yaw) if self._reset_yaw is not None else 0.0
+            self._yopo_policy_segment_score = float("nan")
+            self._yopo_policy_action_id = -1
+            self._yopo_trajectory = None
+            self._yopo_desired_pos = None
+            self._yopo_desired_vel.fill(0.0)
+            self._yopo_desired_acc.fill(0.0)
+            self._yopo_policy_speed_cmd = 0.0
+            self._yopo_policy_terminal_wait_logged = False
+            self._reset_path_visualization()
+            self._update_goal_visualization(None)
+            if reason != "startup":
+                self.get_logger().info(f"Restarted internal YOPO-policy task after {reason}.")
 
         def _restart_rolling_figure8_task(self, *, reason: str) -> None:
             if not self._rolling_figure8:
@@ -2180,12 +3079,528 @@ def main() -> None:
             self._figure8_trajectory = None
             self._figure8_last_sample_time = float(self._current_sim_time)
             self._reset_path_visualization()
+            self._update_goal_visualization(self._goal_visual_position())
             if reason != "startup":
                 center = self._figure8_center if self._figure8_center is not None else np.zeros(3, dtype=np.float64)
                 self.get_logger().info(
                     "Restarted internal rolling figure-eight task "
                     f"after {reason}: center=({center[0]:.3f}, {center[1]:.3f}, {center[2]:.3f})."
                 )
+
+        def _ensure_yopo_goal(self) -> bool:
+            if (
+                not self._yopo_policy_enabled
+                or self._yopo_policy_runtime is None
+                or self._reset_pos is None
+            ):
+                return False
+            if self._yopo_goal is not None:
+                return True
+            if self._yopo_policy_fixed_goal is not None:
+                goal_array = np.array(self._yopo_policy_fixed_goal, dtype=np.float32)
+                goal_source = "fixed"
+            else:
+                goal = self._yopo_policy_runtime.sample_goal(
+                    start_pos=np.array(self._reset_pos, dtype=np.float32),
+                    min_distance=self._yopo_policy_min_goal_distance,
+                )
+                goal_array = np.array(goal, dtype=np.float32)
+                goal_source = "sampled random"
+            goal_array[2] = float(self._reset_pos[2])
+            goal_array[2] = float(
+                np.clip(goal_array[2], self._yopo_floor_limit_z(), self._yopo_ceiling_limit_z())
+            )
+            self._yopo_goal = goal_array
+            self._publish_goal_target(self._yopo_goal, float(self._current_sim_time))
+            self.get_logger().info(
+                "Internal YOPO-policy task: "
+                f"{goal_source} mission goal ({self._yopo_goal[0]:.3f}, "
+                f"{self._yopo_goal[1]:.3f}, {self._yopo_goal[2]:.3f})."
+            )
+            return True
+
+        def _replan_yopo_policy_trajectory(self, *, now: float, force: bool = False) -> bool:
+            if (
+                not self._yopo_policy_enabled
+                or self._yopo_policy_runtime is None
+                or self._last_state is None
+                or self._last_depth is None
+            ):
+                return False
+            if not self._ensure_yopo_goal():
+                return False
+            if (not force) and (now - self._yopo_policy_last_plan_time < self._yopo_policy_replan_dt - 1e-9):
+                return self._yopo_trajectory is not None
+
+            state = np.array(self._last_state, dtype=np.float64)
+            start_pos = np.array(state[:3], dtype=np.float64)
+            start_quat = np.array(state[3:7], dtype=np.float64)
+            start_vel = np.array(state[7:10], dtype=np.float64) if state.size >= 10 else np.zeros(3, dtype=np.float64)
+            start_acc = np.array(self._yopo_desired_acc, dtype=np.float64)
+            goal_reference_pos = (
+                np.array(self._yopo_desired_pos, dtype=np.float64)
+                if self._yopo_desired_pos is not None
+                else np.array(start_pos, dtype=np.float64)
+            )
+
+            plan = self._yopo_policy_runtime.infer_segment(
+                depth_image_m=np.array(self._last_depth, dtype=np.float32),
+                start_pos_world=start_pos,
+                start_quat_wxyz=start_quat,
+                start_vel_world=start_vel,
+                start_acc_world=start_acc,
+                mission_goal_world=np.array(self._yopo_goal, dtype=np.float32),
+                goal_reference_pos_world=goal_reference_pos,
+                candidate_limit=self._path_candidate_limit,
+            )
+            selected_candidate, selected_metrics = self._select_safe_yopo_candidate(
+                start_pos=start_pos,
+                start_vel=start_vel,
+                start_acc=start_acc,
+                mission_goal=np.array(self._yopo_goal, dtype=np.float64),
+                plan=plan,
+            )
+            if selected_candidate is None or selected_metrics is None:
+                self.get_logger().warning(
+                    "Internal YOPO-policy task: failed to select a valid candidate segment for replanning."
+                )
+                return False
+            selected_min_z = float(selected_metrics["min_z"])
+            selected_max_z = float(selected_metrics["max_z"])
+
+            capture_goal_distance = min(
+                float(selected_metrics["terminal_goal_distance"]),
+                float(selected_metrics["best_goal_distance"]),
+            )
+            docking_trigger_distance = self._yopo_goal_docking_trigger_distance(float(np.linalg.norm(start_vel)))
+            if capture_goal_distance <= docking_trigger_distance:
+                return self._start_yopo_goal_docking(
+                    now=float(now),
+                    pos=start_pos,
+                    vel=start_vel,
+                    trigger_reason=(
+                        f"predicted_goal_dist={capture_goal_distance:.3f} m <= "
+                        f"trigger_dist={docking_trigger_distance:.3f} m"
+                    ),
+                )
+
+            vel_scale, acc_scale = self._yopo_pre_docking_terminal_scale(capture_goal_distance)
+            segment_goal_vel = np.array(selected_candidate.segment_velocity_world, dtype=np.float64) * float(vel_scale)
+            segment_goal_acc = np.array(selected_candidate.segment_acceleration_world, dtype=np.float64) * float(acc_scale)
+            cruise_speed_cap = self._yopo_policy_reference_speed_limit("cruise")
+            if np.isfinite(cruise_speed_cap) and cruise_speed_cap > 1e-6:
+                segment_goal_vel = self._clip_vector_norm(segment_goal_vel, cruise_speed_cap)
+            cruise_acc_cap = self._yopo_policy_reference_acc_limit()
+            if np.isfinite(cruise_acc_cap) and cruise_acc_cap > 1e-6:
+                segment_goal_acc = self._clip_vector_norm(segment_goal_acc, cruise_acc_cap)
+            pre_docking_speed_cap = min(
+                self._yopo_goal_docking_speed_limit(),
+                math.sqrt(max(0.0, 2.0 * 2.0 * max(capture_goal_distance - self._yopo_goal_hold_tolerance(), 0.0))),
+            )
+            if capture_goal_distance <= max(self._yopo_goal_docking_trigger_distance(float(np.linalg.norm(start_vel))), 3.5):
+                if pre_docking_speed_cap <= 1e-6:
+                    segment_goal_vel = np.zeros(3, dtype=np.float64)
+                else:
+                    segment_goal_vel = self._clip_vector_norm(segment_goal_vel, pre_docking_speed_cap)
+
+            self._yopo_trajectory = QuinticTrajectory(
+                start_pos=np.array(start_pos, dtype=np.float64),
+                start_vel=np.array(start_vel, dtype=np.float64),
+                start_acc=np.array(start_acc, dtype=np.float64),
+                goal_pos=np.array(selected_candidate.segment_goal_world, dtype=np.float64),
+                goal_vel=segment_goal_vel,
+                goal_acc=segment_goal_acc,
+                duration=float(selected_candidate.segment_duration),
+                yaw_mode="adaptive",
+                initial_yaw=float(self._yopo_policy_last_yaw),
+                fixed_yaw=float(self._yopo_policy_last_yaw),
+                max_yaw_rate=self._quintic_max_yaw_rate,
+            )
+            self._rebuild_yopo_candidate_visual(
+                start_pos=start_pos,
+                start_vel=start_vel,
+                start_acc=start_acc,
+                plan=plan,
+                selected_action_id=int(selected_candidate.action_id),
+            )
+            self._yopo_policy_last_plan_time = float(now)
+            self._yopo_policy_last_sample_time = float(now)
+            self._yopo_policy_segment_score = float(selected_candidate.score)
+            self._yopo_policy_action_id = int(selected_candidate.action_id)
+            self._yopo_policy_phase = "cruise"
+            if not self._path_actual_points:
+                self._path_actual_points = [[float(start_pos[0]), float(start_pos[1]), float(start_pos[2])]]
+                self._path_actual_stride_counter = 0
+            self._rebuild_quintic_reference_visual()
+            scale_log = ""
+            if vel_scale < 0.999 or acc_scale < 0.999:
+                scale_log = f", near_goal_ref_scale=(vel={vel_scale:.2f}, acc={acc_scale:.2f})"
+            selection_log = ""
+            if int(selected_candidate.action_id) != int(plan.action_id):
+                selection_log = (
+                    f", replanner_selected_action={int(selected_candidate.action_id)}"
+                    f" over_network_best={int(plan.action_id)}"
+                )
+            self.get_logger().info(
+                "Internal YOPO-policy task: "
+                f"planned segment toward mission goal ({self._yopo_goal[0]:.3f}, {self._yopo_goal[1]:.3f}, {self._yopo_goal[2]:.3f}) "
+                f"via action={self._yopo_policy_action_id}, score={self._yopo_policy_segment_score:.4f}, "
+                f"segment_goal=({selected_candidate.segment_goal_world[0]:.3f}, "
+                f"{selected_candidate.segment_goal_world[1]:.3f}, {selected_candidate.segment_goal_world[2]:.3f}), "
+                f"segment_min_z={selected_min_z:.3f} m, segment_max_z={selected_max_z:.3f} m, "
+                f"lookahead_progress={float(selected_metrics.get('lookahead_progress', float('nan'))):.3f} m, "
+                f"terminal_progress={float(selected_metrics.get('terminal_progress', float('nan'))):.3f} m"
+                f"{scale_log}{selection_log}."
+            )
+            return True
+
+        def _estimate_yopo_goal_docking_duration(self, *, dist: float, speed: float, closing_speed: float) -> float:
+            nominal_speed = min(
+                self._yopo_goal_docking_speed_limit(),
+                max(float(speed), float(closing_speed), 0.0),
+            )
+            travel_time = 2.6 * float(dist) / max(1.0, nominal_speed + 0.35)
+            braking_time = nominal_speed / 1.5
+            return float(np.clip(max(2.5, travel_time, 1.8 * braking_time), 2.5, 6.0))
+
+        def _start_yopo_goal_docking(
+            self,
+            *,
+            now: float,
+            pos: np.ndarray,
+            vel: np.ndarray,
+            trigger_reason: str,
+        ) -> bool:
+            if not self._yopo_policy_enabled or self._yopo_goal is None:
+                return False
+
+            goal = np.array(self._yopo_goal, dtype=np.float64)
+            start_pos = np.array(pos, dtype=np.float64)
+            start_vel = np.array(vel, dtype=np.float64)
+            start_acc = np.array(self._linear_acc_estimate, dtype=np.float64)
+            dist = float(np.linalg.norm(goal - start_pos))
+            speed = float(np.linalg.norm(start_vel))
+            traj_start_vel, traj_start_acc, raw_closing_speed, shaped_closing_speed = (
+                self._condition_yopo_goal_docking_entry_state(
+                    pos=start_pos,
+                    vel=start_vel,
+                    acc=start_acc,
+                    goal=goal,
+                )
+            )
+            traj_speed = float(np.linalg.norm(traj_start_vel))
+            duration = self._estimate_yopo_goal_docking_duration(
+                dist=dist,
+                speed=traj_speed,
+                closing_speed=max(0.0, shaped_closing_speed),
+            )
+
+            self._yopo_trajectory = QuinticTrajectory(
+                start_pos=start_pos,
+                start_vel=traj_start_vel,
+                start_acc=traj_start_acc,
+                goal_pos=goal,
+                goal_vel=np.zeros(3, dtype=np.float64),
+                goal_acc=np.zeros(3, dtype=np.float64),
+                duration=duration,
+                yaw_mode="adaptive",
+                initial_yaw=float(self._yopo_policy_last_yaw),
+                fixed_yaw=float(self._yopo_policy_last_yaw),
+                max_yaw_rate=self._quintic_max_yaw_rate,
+            )
+            self._yopo_policy_phase = "goal_docking"
+            self._yopo_policy_last_plan_time = float(now)
+            self._yopo_policy_last_sample_time = float(now)
+            self._yopo_policy_segment_score = float("nan")
+            self._yopo_policy_action_id = -1
+            self._yopo_policy_speed_cmd = traj_speed
+            self._yopo_policy_terminal_wait_logged = False
+            self._path_candidate_points.clear()
+            self._path_candidate_colors.clear()
+            self._path_candidate_widths.clear()
+            if not self._path_actual_points:
+                self._path_actual_points = [[float(start_pos[0]), float(start_pos[1]), float(start_pos[2])]]
+                self._path_actual_stride_counter = 0
+            self._rebuild_quintic_reference_visual()
+            self.get_logger().info(
+                "Internal YOPO-policy task: "
+                f"switching to terminal goal-docking quintic ({trigger_reason}), "
+                f"planning terminal quintic to mission goal ({goal[0]:.3f}, {goal[1]:.3f}, {goal[2]:.3f}) "
+                f"over {duration:.2f}s with terminal_vel=(0.000, 0.000, 0.000), "
+                f"entry_speed_actual={speed:.3f} m/s, "
+                f"entry_speed_quintic={traj_speed:.3f} m/s, "
+                f"closing_speed_actual={raw_closing_speed:.3f} m/s, "
+                f"closing_speed_quintic={shaped_closing_speed:.3f} m/s."
+            )
+            return True
+
+        def _apply_yopo_policy_command(self) -> bool:
+            if (
+                not self._yopo_policy_enabled
+                or self._last_state is None
+                or self._reset_pos is None
+            ):
+                return False
+
+            mission_time = max(0.0, float(self._current_sim_time) - float(self._yopo_policy_start_time))
+            yaw = float(self._reset_yaw) if self._reset_yaw is not None else 0.0
+            hold_yaw = float(self._yopo_policy_last_yaw)
+            if mission_time < self._yopo_policy_initial_hover_s:
+                if self._yopo_policy_phase != "startup_hover":
+                    self._yopo_policy_phase = "startup_hover"
+                    self.get_logger().info(
+                        "Internal YOPO-policy task: "
+                        f"holding startup position for {self._yopo_policy_initial_hover_s:.2f}s before activating policy replanning."
+                    )
+                pos_cmd, vel_cmd, acc_cmd, jerk_cmd = self._clamp_yopo_reference_to_altitude_limits(
+                    np.array(self._reset_pos, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                )
+                self._apply_position_command(
+                    pos_cmd,
+                    vel_cmd,
+                    acc_cmd,
+                    jerk_cmd,
+                    yaw,
+                    0.0,
+                )
+                return True
+
+            if not self._ensure_yopo_goal():
+                pos_cmd, vel_cmd, acc_cmd, jerk_cmd = self._clamp_yopo_reference_to_altitude_limits(
+                    np.array(self._reset_pos, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                )
+                self._apply_position_command(
+                    pos_cmd,
+                    vel_cmd,
+                    acc_cmd,
+                    jerk_cmd,
+                    yaw,
+                    0.0,
+                )
+                return True
+
+            pos = np.array(self._last_state[:3], dtype=np.float32)
+            vel = np.array(self._last_state[7:10], dtype=np.float32) if self._last_state.size >= 10 else np.zeros(3, dtype=np.float32)
+            delta = np.array(self._yopo_goal, dtype=np.float32) - pos
+            dist = float(np.linalg.norm(delta))
+            speed = float(np.linalg.norm(vel))
+            if self._yopo_policy_goal_reached:
+                self._yopo_policy_speed_cmd = 0.0
+                pos_cmd, vel_cmd, acc_cmd, jerk_cmd = self._clamp_yopo_reference_to_altitude_limits(
+                    np.array(self._yopo_goal, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                )
+                self._apply_position_command(
+                    pos_cmd,
+                    vel_cmd,
+                    acc_cmd,
+                    jerk_cmd,
+                    hold_yaw,
+                    0.0,
+                )
+                return True
+
+            if self._yopo_policy_phase == "goal_docking":
+                if self._yopo_trajectory is None:
+                    self._yopo_policy_goal_reached = True
+                    self._yopo_policy_phase = "goal_hold"
+                    pos_cmd, vel_cmd, acc_cmd, jerk_cmd = self._clamp_yopo_reference_to_altitude_limits(
+                        np.array(self._yopo_goal, dtype=np.float32),
+                        np.zeros(3, dtype=np.float32),
+                        np.zeros(3, dtype=np.float32),
+                        np.zeros(3, dtype=np.float32),
+                    )
+                    self._apply_position_command(
+                        pos_cmd,
+                        vel_cmd,
+                        acc_cmd,
+                        jerk_cmd,
+                        hold_yaw,
+                        0.0,
+                    )
+                    return True
+                else:
+                    elapsed = max(0.0, float(self._current_sim_time) - float(self._yopo_policy_last_plan_time))
+                    dt = max(float(self._current_sim_time) - float(self._yopo_policy_last_sample_time), self._physics_dt, 1e-3)
+                    if elapsed >= float(self._yopo_trajectory.duration):
+                        actual_remaining = float(np.linalg.norm(np.array(self._yopo_goal, dtype=np.float32) - pos))
+                        hold_tol = self._yopo_goal_docking_completion_tolerance()
+                        hold_speed = self._yopo_goal_docking_completion_speed()
+                        if (
+                            actual_remaining <= hold_tol
+                            and speed <= hold_speed
+                        ):
+                            self._yopo_policy_goal_reached = True
+                            self._yopo_policy_phase = "goal_hold"
+                            self._yopo_policy_segment_score = float("nan")
+                            self._yopo_policy_action_id = -1
+                            self._yopo_policy_speed_cmd = 0.0
+                            self._yopo_trajectory = None
+                            self._yopo_desired_pos = np.array(self._yopo_goal, dtype=np.float32)
+                            self._yopo_desired_vel.fill(0.0)
+                            self._yopo_desired_acc.fill(0.0)
+                            self._path_preview_points.clear()
+                            self._draw_path_visualization()
+                            self._yopo_policy_terminal_wait_logged = False
+                            self.get_logger().info(
+                                "Internal YOPO-policy task: "
+                                f"terminal quintic completed; hovering at mission goal ({self._yopo_goal[0]:.3f}, "
+                                f"{self._yopo_goal[1]:.3f}, {self._yopo_goal[2]:.3f}), "
+                                f"actual_remaining_dist={actual_remaining:.3f} m, speed={speed:.3f} m/s."
+                            )
+                            pos_cmd, vel_cmd, acc_cmd, jerk_cmd = self._clamp_yopo_reference_to_altitude_limits(
+                                np.array(self._yopo_goal, dtype=np.float32),
+                                np.zeros(3, dtype=np.float32),
+                                np.zeros(3, dtype=np.float32),
+                                np.zeros(3, dtype=np.float32),
+                            )
+                            self._apply_position_command(
+                                pos_cmd,
+                                vel_cmd,
+                                acc_cmd,
+                                jerk_cmd,
+                                hold_yaw,
+                                0.0,
+                            )
+                            return True
+
+                        if not self._yopo_policy_terminal_wait_logged:
+                            self._yopo_policy_terminal_wait_logged = True
+                            self.get_logger().info(
+                                "Internal YOPO-policy task: "
+                                "terminal quintic reached its end-state before settle; "
+                                "replanning another docking quintic: "
+                                f"remaining_dist={actual_remaining:.3f} m, speed={speed:.3f} m/s, "
+                                f"required=({hold_tol:.3f} m, {hold_speed:.3f} m/s)."
+                            )
+                        self._start_yopo_goal_docking(
+                            now=float(self._current_sim_time),
+                            pos=np.array(pos, dtype=np.float32),
+                            vel=np.array(vel, dtype=np.float32),
+                            trigger_reason=(
+                                f"terminal_refine remaining_dist={actual_remaining:.3f} m, "
+                                f"speed={speed:.3f} m/s"
+                            ),
+                        )
+                        elapsed = 0.0
+                        dt = max(self._physics_dt, 1e-3)
+
+                    sample = self._yopo_trajectory.sample(elapsed, last_yaw=self._yopo_policy_last_yaw, dt=dt)
+                    pos_des, vel_des, acc_des, jerk_des, yaw_des, yaw_rate_des = sample.as_eval_inputs()
+                    pos_des, vel_des, acc_des = self._shape_yopo_goal_tracking_reference(
+                        actual_pos=np.array(pos, dtype=np.float64),
+                        actual_vel=np.array(vel, dtype=np.float64),
+                        desired_pos=pos_des,
+                        desired_vel=vel_des,
+                        desired_acc=acc_des,
+                        phase="goal_docking",
+                    )
+                    pos_des, vel_des, acc_des, jerk_des = self._clamp_yopo_reference_to_altitude_limits(
+                        pos_des,
+                        vel_des,
+                        acc_des,
+                        jerk_des,
+                    )
+                    self._apply_position_command(pos_des, vel_des, acc_des, jerk_des, yaw_des, yaw_rate_des)
+                    self._yopo_desired_pos = np.array(pos_des, dtype=np.float32)
+                    self._yopo_desired_vel = np.array(vel_des, dtype=np.float32)
+                    self._yopo_desired_acc = np.array(acc_des, dtype=np.float32)
+                    self._yopo_policy_last_yaw = float(yaw_des)
+                    self._yopo_policy_last_sample_time = float(self._current_sim_time)
+                    return True
+
+            current_docking_trigger = self._yopo_goal_docking_trigger_distance(speed)
+            if dist <= current_docking_trigger:
+                if not self._start_yopo_goal_docking(
+                    now=float(self._current_sim_time),
+                    pos=np.array(pos, dtype=np.float64),
+                    vel=np.array(vel, dtype=np.float64),
+                    trigger_reason=f"current_dist={dist:.3f} m <= trigger_dist={current_docking_trigger:.3f} m",
+                ):
+                    pos_cmd, vel_cmd, acc_cmd, jerk_cmd = self._clamp_yopo_reference_to_altitude_limits(
+                        np.array(self._yopo_goal, dtype=np.float32),
+                        np.zeros(3, dtype=np.float32),
+                        np.zeros(3, dtype=np.float32),
+                        np.zeros(3, dtype=np.float32),
+                    )
+                    self._apply_position_command(
+                        pos_cmd,
+                        vel_cmd,
+                        acc_cmd,
+                        jerk_cmd,
+                        yaw,
+                        0.0,
+                    )
+                    return True
+
+                elapsed = max(0.0, float(self._current_sim_time) - float(self._yopo_policy_last_plan_time))
+                dt = max(float(self._current_sim_time) - float(self._yopo_policy_last_sample_time), self._physics_dt, 1e-3)
+                sample = self._yopo_trajectory.sample(elapsed, last_yaw=self._yopo_policy_last_yaw, dt=dt)
+                pos_des, vel_des, acc_des, jerk_des, yaw_des, yaw_rate_des = sample.as_eval_inputs()
+                pos_des, vel_des, acc_des = self._shape_yopo_goal_tracking_reference(
+                    actual_pos=np.array(pos, dtype=np.float64),
+                    actual_vel=np.array(vel, dtype=np.float64),
+                    desired_pos=pos_des,
+                    desired_vel=vel_des,
+                    desired_acc=acc_des,
+                    phase="goal_docking",
+                )
+                pos_des, vel_des, acc_des, jerk_des = self._clamp_yopo_reference_to_altitude_limits(
+                    pos_des,
+                    vel_des,
+                    acc_des,
+                    jerk_des,
+                )
+                self._apply_position_command(pos_des, vel_des, acc_des, jerk_des, yaw_des, yaw_rate_des)
+                self._yopo_desired_pos = np.array(pos_des, dtype=np.float32)
+                self._yopo_desired_vel = np.array(vel_des, dtype=np.float32)
+                self._yopo_desired_acc = np.array(acc_des, dtype=np.float32)
+                self._yopo_policy_last_yaw = float(yaw_des)
+                self._yopo_policy_last_sample_time = float(self._current_sim_time)
+                return True
+
+            if not self._replan_yopo_policy_trajectory(now=float(self._current_sim_time), force=self._yopo_trajectory is None):
+                pos_cmd, vel_cmd, acc_cmd, jerk_cmd = self._clamp_yopo_reference_to_altitude_limits(
+                    np.array(pos, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                    np.zeros(3, dtype=np.float32),
+                )
+                self._apply_position_command(
+                    pos_cmd,
+                    vel_cmd,
+                    acc_cmd,
+                    jerk_cmd,
+                    yaw,
+                    0.0,
+                )
+                return True
+
+            elapsed = max(0.0, float(self._current_sim_time) - float(self._yopo_policy_last_plan_time))
+            dt = max(float(self._current_sim_time) - float(self._yopo_policy_last_sample_time), self._physics_dt, 1e-3)
+            sample = self._yopo_trajectory.sample(elapsed, last_yaw=self._yopo_policy_last_yaw, dt=dt)
+            pos_des, vel_des, acc_des, jerk_des, yaw_des, yaw_rate_des = sample.as_eval_inputs()
+            pos_des, vel_des, acc_des, jerk_des = self._clamp_yopo_reference_to_altitude_limits(
+                pos_des,
+                vel_des,
+                acc_des,
+                jerk_des,
+            )
+            self._apply_position_command(pos_des, vel_des, acc_des, jerk_des, yaw_des, yaw_rate_des)
+            self._yopo_desired_pos = np.array(pos_des, dtype=np.float32)
+            self._yopo_desired_vel = np.array(vel_des, dtype=np.float32)
+            self._yopo_desired_acc = np.array(acc_des, dtype=np.float32)
+            self._yopo_policy_last_yaw = float(yaw_des)
+            self._yopo_policy_last_sample_time = float(self._current_sim_time)
+            return True
 
         def _update_rolling_figure8_endpoint(self, *, now: float, track_time: float, force: bool = False) -> None:
             if not self._rolling_figure8 or self._figure8_reference is None or self._figure8_center is None:
@@ -2307,6 +3722,8 @@ def main() -> None:
             self._set_hover_command()
 
         def _apply_default_command(self) -> None:
+            if self._apply_yopo_policy_command():
+                return
             if self._apply_rolling_figure8_command():
                 return
             if self._apply_quintic_goal_command():
@@ -2589,6 +4006,7 @@ def main() -> None:
 
         def _publish_goal_target(self, position: np.ndarray, timestamp: float) -> None:
             pos = np.asarray(position, dtype=np.float64).reshape(3)
+            self._update_goal_visualization(pos)
             if self._ros_enabled and self._goal_pub is not None:
                 goal = PoseStamped()
                 self._fill_header(goal.header, timestamp)
@@ -2608,6 +4026,8 @@ def main() -> None:
                 )
 
         def _goal_position_for_publish(self) -> Optional[np.ndarray]:
+            if self._yopo_policy_enabled and self._yopo_goal is not None:
+                return np.array(self._yopo_goal, copy=True)
             if self._rolling_figure8:
                 if self._figure8_endpoint_state is not None:
                     return np.array(self._figure8_endpoint_state.position, copy=True)
@@ -2906,6 +4326,7 @@ def main() -> None:
                 self._refresh_hold_target(state, reason="env_reset", apply_command=True, log_update=True)
                 self._restart_auto_target_goal_task(reason="env_reset")
                 self._restart_quintic_goal_task(reason="env_reset")
+                self._restart_yopo_policy_task(reason="env_reset")
                 self._restart_rolling_figure8_task(reason="env_reset")
                 self._controller.reset(reset_env_ids)
 
@@ -3415,12 +4836,71 @@ def main() -> None:
                 return
             pos = self._last_state[:3]
             vel = self._last_state[7:10]
-            # pos_error = np.clip(pos_des - pos, -1.0, 1.0)
-            # vel_error = np.clip(vel_des + self._kp * pos_error - vel, -1.0, 1.0)
+            kp, kd, ang_kp, max_bodyrate_fb, max_angle = self._active_position_control_profile()
             pos_error = pos_des - pos
-            vel_error = vel_des + self._kp * pos_error - vel
-            pid_acc = self._kd * vel_error
-            total_acc = self._compute_limited_total_acc(pid_acc, acc_des)
+            yopo_phase = str(self._yopo_policy_phase) if self._yopo_policy_enabled else ""
+            yopo_active = (
+                self._yopo_policy_enabled
+                and yopo_phase in {"cruise", "goal_docking", "goal_hold"}
+            )
+            goal_dist = None
+            tracking_speed_limit = float("inf")
+            if yopo_active:
+                if self._yopo_goal is not None:
+                    goal_dist = float(np.linalg.norm(np.array(self._yopo_goal, dtype=np.float64) - np.array(pos, dtype=np.float64)))
+                tracking_speed_limit = self._yopo_execution_speed_limit(
+                    phase=yopo_phase,
+                    actual_pos=np.array(pos, dtype=np.float64),
+                )
+                pos_feedback_vel = kp * pos_error
+                feedback_speed_limit = self._yopo_feedback_speed_limit(
+                    phase=yopo_phase,
+                    speed_limit=tracking_speed_limit,
+                    goal_dist=goal_dist,
+                )
+                if np.isfinite(feedback_speed_limit) and feedback_speed_limit > 1e-6:
+                    pos_feedback_vel = self._clip_vector_norm(pos_feedback_vel, feedback_speed_limit)
+                commanded_track_vel = vel_des + pos_feedback_vel
+                if np.isfinite(tracking_speed_limit) and tracking_speed_limit > 1e-6:
+                    commanded_track_vel = self._clip_vector_norm(commanded_track_vel, tracking_speed_limit)
+                vel_error = commanded_track_vel - vel
+            else:
+                vel_error = vel_des + kp * pos_error - vel
+            pid_acc = kd * vel_error
+            if (
+                yopo_active
+                and np.isfinite(self._yopo_policy_max_acceleration)
+                and self._yopo_policy_max_acceleration > 1e-6
+            ):
+                commanded_acc = np.array(pid_acc + acc_des, dtype=np.float32, copy=True)
+                actual_speed = float(np.linalg.norm(np.array(vel, dtype=np.float64)))
+                if (
+                    np.isfinite(tracking_speed_limit)
+                    and tracking_speed_limit > 1e-6
+                    and actual_speed > max(0.90 * tracking_speed_limit, 0.10)
+                ):
+                    speed_dir = np.array(vel, dtype=np.float64) / max(actual_speed, 1e-6)
+                    along_speed_acc = float(np.dot(np.array(commanded_acc, dtype=np.float64), speed_dir))
+                    overspeed = max(0.0, actual_speed - tracking_speed_limit)
+                    braking_floor = 0.0 if overspeed <= 1e-3 else min(
+                        float(self._yopo_policy_max_acceleration),
+                        0.35 + 2.0 * overspeed,
+                    )
+                    max_along_speed_acc = -braking_floor
+                    if along_speed_acc > max_along_speed_acc:
+                        commanded_acc = np.array(
+                            np.array(commanded_acc, dtype=np.float64)
+                            + (max_along_speed_acc - along_speed_acc) * speed_dir,
+                            dtype=np.float32,
+                        )
+                commanded_acc = self._clip_vector_norm(commanded_acc, self._yopo_policy_max_acceleration)
+                total_acc = self._compute_limited_total_acc(
+                    np.zeros(3, dtype=np.float64),
+                    commanded_acc,
+                    max_angle=max_angle,
+                )
+            else:
+                total_acc = self._compute_limited_total_acc(pid_acc, acc_des, max_angle=max_angle)
             current_quat = np.array(self._last_state[3:7], dtype=np.float64)
             body_z = self._quaternion_to_matrix(current_quat) @ np.array([0, 0, 1])
             acc_along_z = float(np.dot(total_acc, body_z))
@@ -3440,13 +4920,18 @@ def main() -> None:
                 quat, bodyrate = attitude
                 self._last_att_quat = quat
                 self._last_bodyrate = bodyrate
-            fb_rates = self._compute_feedback_bodyrates(quat, current_quat)
+            fb_rates = self._compute_feedback_bodyrates(
+                quat,
+                current_quat,
+                ang_kp=ang_kp,
+                max_bodyrate_fb=max_bodyrate_fb,
+            )
             bodyrate = bodyrate + fb_rates
             self._last_bodyrate = bodyrate
 
             roll_raw, pitch_raw, yaw_raw = self._quaternion_to_euler_zyx(quat)
-            max_roll = self._max_angle
-            max_pitch = self._max_angle
+            max_roll = max_angle
+            max_pitch = max_angle
             max_yaw = math.radians(180.0)
 
             scale = max(
@@ -3530,14 +5015,19 @@ def main() -> None:
             header.frame_id = self._frame_id
 
         def _compute_feedback_bodyrates(
-            self, desired_quat: Tuple[float, float, float, float], current_quat: Tuple[float, float, float, float]
+            self,
+            desired_quat: Tuple[float, float, float, float],
+            current_quat: Tuple[float, float, float, float],
+            *,
+            ang_kp: np.ndarray,
+            max_bodyrate_fb: float,
         ) -> np.ndarray:
             q_des = np.array(desired_quat, dtype=np.float64)
             q_est = np.array(current_quat, dtype=np.float64)
             q_err = self._quat_multiply(self._quat_conjugate(q_est), q_des)
             sign = 1.0 if q_err[0] >= 0.0 else -1.0
-            fb = 2.0 * self._ang_kp * q_err[1:] * sign
-            np.clip(fb, -self._max_bodyrate_fb, self._max_bodyrate_fb, out=fb)
+            fb = 2.0 * np.array(ang_kp, dtype=np.float64) * q_err[1:] * sign
+            np.clip(fb, -float(max_bodyrate_fb), float(max_bodyrate_fb), out=fb)
             return fb
 
         def close(self) -> None:
@@ -3579,7 +5069,13 @@ def main() -> None:
                 self._ros2_sidecar_process = None
             self.destroy_node()
 
-        def _compute_limited_total_acc(self, pid_error_acc: np.ndarray, ref_acc: np.ndarray) -> np.ndarray:
+        def _compute_limited_total_acc(
+            self,
+            pid_error_acc: np.ndarray,
+            ref_acc: np.ndarray,
+            *,
+            max_angle: float,
+        ) -> np.ndarray:
             total_acc = pid_error_acc + ref_acc
             total_acc[2] += self._gravity
             norm = np.linalg.norm(total_acc)
@@ -3594,9 +5090,14 @@ def main() -> None:
             if norm_axis > 1e-9:
                 rot_axis /= norm_axis
             rot_ang = math.acos(np.dot(np.array([0.0, 0.0, 1.0], dtype=np.float64), z_b))
-            if rot_ang > self._max_angle:
-                limited_z_b = self._axis_angle_rotation(rot_axis, self._max_angle, np.array([0.0, 0.0, 1.0], dtype=np.float64))
-                total_acc = z_acc / math.cos(self._max_angle) * limited_z_b
+            max_angle_value = float(max_angle)
+            if rot_ang > max_angle_value:
+                limited_z_b = self._axis_angle_rotation(
+                    rot_axis,
+                    max_angle_value,
+                    np.array([0.0, 0.0, 1.0], dtype=np.float64),
+                )
+                total_acc = z_acc / math.cos(max_angle_value) * limited_z_b
             return total_acc
 
         @staticmethod

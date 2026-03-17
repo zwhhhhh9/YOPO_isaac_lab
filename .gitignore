@@ -3,6 +3,9 @@ yopo_drone/assets/
 
 # Runtime logs/artifacts
 logs/
+yopo_drone/logs/
+yopo_drone/network/data_train/
+yopo_drone/network/checkpoint/
 *.log
 yopo_drone/data/*.csv
 

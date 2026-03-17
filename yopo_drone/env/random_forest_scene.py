@@ -47,8 +47,21 @@ class RandomForestSceneCfg:
     base_upper_canopy_height: float = 1.80
 
 
-def add_random_forest_arguments(parser: argparse.ArgumentParser) -> None:
-    """Register CLI flags used by drone_env_editor."""
+@dataclass(frozen=True, slots=True)
+class TreeTrunkObstacle:
+    x: float
+    y: float
+    radius: float
+
+def add_random_forest_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    default_size_x: float = 80.0,
+    default_size_y: float = 80.0,
+    default_tile_radius: int = 2,
+    default_clearance_radius: float = 2.5,
+) -> None:
+    """Register CLI flags used by drone_env_editor and dataset collection."""
     group = parser.add_argument_group("random forest")
     group.add_argument(
         "--add-random-forest",
@@ -70,19 +83,19 @@ def add_random_forest_arguments(parser: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--random-forest-size-x",
         type=float,
-        default=80.0,
+        default=default_size_x,
         help="Single forest tile width along X in meters.",
     )
     group.add_argument(
         "--random-forest-size-y",
         type=float,
-        default=80.0,
+        default=default_size_y,
         help="Single forest tile width along Y in meters.",
     )
     group.add_argument(
         "--random-forest-tile-radius",
         type=int,
-        default=2,
+        default=default_tile_radius,
         help="Static repeat radius in tiles. Total tiles = (2r+1)^2.",
     )
     group.add_argument(
@@ -94,7 +107,7 @@ def add_random_forest_arguments(parser: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--random-forest-clearance-radius",
         type=float,
-        default=2.5,
+        default=default_clearance_radius,
         help="Keep this radius around the robot start position free of trees.",
     )
     group.add_argument(
@@ -231,6 +244,37 @@ def add_random_forest_scene(*, sim_utils: Any, cfg: RandomForestSceneCfg) -> dic
     , flush=True)
     return summary
 
+
+def generate_random_forest_trunk_obstacles(cfg: RandomForestSceneCfg) -> list[TreeTrunkObstacle]:
+    """Recreate the deterministic trunk layout used by the random forest scene."""
+    _validate_cfg(cfg)
+
+    obstacles: list[TreeTrunkObstacle] = []
+    for tile_x in range(-cfg.tile_radius, cfg.tile_radius + 1):
+        for tile_y in range(-cfg.tile_radius, cfg.tile_radius + 1):
+            tile_center_x = float(tile_x) * cfg.size_x
+            tile_center_y = float(tile_y) * cfg.size_y
+            rng = random.Random(_tile_seed(cfg.seed, tile_x, tile_y))
+            positions = _generate_tile_positions(cfg, rng, tile_center_x=tile_center_x, tile_center_y=tile_center_y)
+            for local_x, local_y in positions:
+                scale_factor = rng.uniform(cfg.scale_min, cfg.scale_max)
+                trunk_radius_scale = rng.uniform(cfg.trunk_radius_scale_min, cfg.trunk_radius_scale_max)
+                lower_canopy_scale = rng.uniform(cfg.canopy_scale_min, cfg.canopy_scale_max)
+                upper_canopy_scale = rng.uniform(cfg.canopy_scale_min, min(cfg.canopy_scale_max, lower_canopy_scale))
+                roll = rng.uniform(-cfg.tilt_deg_max, cfg.tilt_deg_max)
+                pitch = rng.uniform(-cfg.tilt_deg_max, cfg.tilt_deg_max)
+                yaw = rng.uniform(0.0, 360.0)
+                trunk_radius = cfg.base_trunk_radius * scale_factor * trunk_radius_scale
+                obstacles.append(
+                    TreeTrunkObstacle(
+                        x=tile_center_x + float(local_x),
+                        y=tile_center_y + float(local_y),
+                        radius=float(trunk_radius),
+                    )
+                )
+                _ = upper_canopy_scale, roll, pitch, yaw
+
+    return obstacles
 
 def _build_tree_cfgs(sim_utils: Any, cfg: RandomForestSceneCfg) -> tuple[Any, Any, Any]:
     trunk_cfg = sim_utils.CylinderCfg(
