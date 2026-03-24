@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import json
+import math
 import re
+import random
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +14,7 @@ import torch.nn.functional as f
 from scipy.ndimage import distance_transform_edt
 
 from .config import ensure_config
+from yopo_drone.env.random_forest_scene import RandomForestSceneCfg, _generate_tile_positions, _tile_seed
 
 _PLY_TYPE_TO_NUMPY = {
     "char": "i1",
@@ -21,6 +26,16 @@ _PLY_TYPE_TO_NUMPY = {
     "float": "f4",
     "double": "f8",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class _TrunkPrimitive:
+    x: float
+    y: float
+    z: float
+    radius: float
+    height: float
+    rotation: np.ndarray
 
 
 def _read_ply_points(path: Path) -> np.ndarray:
@@ -80,6 +95,44 @@ def _read_ply_points(path: Path) -> np.ndarray:
             raise ValueError(f"Unsupported PLY format '{fmt}' in {path}")
 
     return np.asarray(points, dtype=np.float32).reshape(-1, 3)
+
+
+def _quaternion_wxyz_from_euler_xyz_deg(roll_deg: float, pitch_deg: float, yaw_deg: float) -> np.ndarray:
+    roll = math.radians(float(roll_deg))
+    pitch = math.radians(float(pitch_deg))
+    yaw = math.radians(float(yaw_deg))
+    cr = math.cos(roll * 0.5)
+    sr = math.sin(roll * 0.5)
+    cp = math.cos(pitch * 0.5)
+    sp = math.sin(pitch * 0.5)
+    cy = math.cos(yaw * 0.5)
+    sy = math.sin(yaw * 0.5)
+    return np.array(
+        [
+            cy * cp * cr + sy * sp * sr,
+            cy * cp * sr - sy * sp * cr,
+            cy * sp * cr + sy * cp * sr,
+            sy * cp * cr - cy * sp * sr,
+        ],
+        dtype=np.float32,
+    )
+
+
+def _rotation_matrix_from_quaternion_wxyz(quat: np.ndarray) -> np.ndarray:
+    w, x, y, z = [float(v) for v in quat]
+    return np.array(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ],
+        dtype=np.float32,
+    )
+
+
+def _rotation_matrix_from_euler_xyz_deg(roll_deg: float, pitch_deg: float, yaw_deg: float) -> np.ndarray:
+    quat = _quaternion_wxyz_from_euler_xyz_deg(roll_deg, pitch_deg, yaw_deg)
+    return _rotation_matrix_from_quaternion_wxyz(quat)
 
 
 class SafetyLoss(nn.Module):
@@ -243,13 +296,14 @@ class SafetyLoss(nn.Module):
                 f"No pointcloud PLY files were found under {path}. "
                 "Expected pointcloud.ply, pointcloud_<n>.ply, or pointcloud-<n>.ply."
             )
+        dataset_metadata = self._load_dataset_metadata(path)
 
         sdf_maps: list[th.Tensor] = []
         min_bounds: list[np.ndarray] = []
         max_bounds: list[np.ndarray] = []
         sdf_shapes: list[tuple[int, int, int]] = []
 
-        for file_path in sorted_files:
+        for file_index, file_path in enumerate(sorted_files):
             points = _read_ply_points(file_path)
             min_bound = points.min(axis=0) - self.map_expand_min
             max_bound = points.max(axis=0) + self.map_expand_max
@@ -261,12 +315,30 @@ class SafetyLoss(nn.Module):
             )
 
             sdf_shape = np.ceil((max_bound - min_bound) / self.voxel_size).astype(int)
-            voxel_indices = ((points - min_bound) / self.voxel_size).astype(int)
-            valid_mask = np.all((voxel_indices >= 0) & (voxel_indices < sdf_shape), axis=1)
-            voxel_indices = voxel_indices[valid_mask]
+            occupancy, source_label = self._build_metadata_occupancy(
+                metadata=dataset_metadata,
+                file_path=file_path,
+                default_map_index=file_index,
+                min_bound=min_bound,
+                sdf_shape=sdf_shape,
+            )
+            if occupancy is not None:
+                source_label = source_label or "metadata_trunks+ground"
+            else:
+                voxel_indices = ((points - min_bound) / self.voxel_size).astype(int)
+                valid_mask = np.all((voxel_indices >= 0) & (voxel_indices < sdf_shape), axis=1)
+                voxel_indices = voxel_indices[valid_mask]
 
-            occupancy = np.zeros(sdf_shape, dtype=np.uint8)
-            occupancy[tuple(voxel_indices.T)] = 1
+                occupancy = np.zeros(sdf_shape, dtype=np.uint8)
+                occupancy[tuple(voxel_indices.T)] = 1
+                source_label = "surface_pointcloud"
+                print(
+                    f"[Warn] Falling back to sparse surface-pointcloud occupancy for {file_path.name}. "
+                    "This does not reconstruct solid trunks and can make the safety SDF overly optimistic. "
+                    "Provide metadata.json with explicit trunks or recollect the dataset.",
+                    flush=True,
+                )
+            print(f"      ESDF source={source_label}", flush=True)
 
             obstacle_mask = occupancy == 1
             free_mask = occupancy == 0
@@ -293,6 +365,257 @@ class SafetyLoss(nn.Module):
         self.max_bounds = th.tensor(np.asarray(max_bounds), device=self.device).float()
         self.sdf_shapes = th.tensor(np.asarray(sdf_shapes), device=self.device).float()
         return sdf_maps
+
+    def _load_dataset_metadata(self, path: Path) -> dict[str, object] | None:
+        path = Path(path).expanduser().resolve()
+        metadata_path = path / "metadata.json" if path.is_dir() else path.parent / "metadata.json"
+        if not metadata_path.is_file():
+            return None
+        try:
+            return json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"[Warn] Failed to load dataset metadata from {metadata_path}: {exc}", flush=True)
+            return None
+
+    def _build_metadata_occupancy(
+        self,
+        *,
+        metadata: dict[str, object] | None,
+        file_path: Path,
+        default_map_index: int,
+        min_bound: np.ndarray,
+        sdf_shape: np.ndarray,
+    ) -> tuple[np.ndarray | None, str | None]:
+        if not isinstance(metadata, dict):
+            return None, None
+        raw_args = metadata.get("args")
+        if not isinstance(raw_args, dict):
+            return None, None
+
+        if bool(raw_args.get("random_forest_canopy_collision", False)):
+            return None, None
+
+        map_index = self._resolve_metadata_map_index(file_path=file_path, default_map_index=default_map_index)
+        map_entry = self._metadata_map_entry(metadata, map_index=map_index)
+        explicit_trunks = self._explicit_trunks_from_metadata(map_entry)
+        include_ground = not bool(raw_args.get("disable_pointcloud_ground", False))
+        ground_z = float(raw_args.get("pointcloud_ground_z", 0.0))
+        if explicit_trunks is not None:
+            occupancy = self._build_trunk_occupancy(
+                trunks=explicit_trunks,
+                min_bound=min_bound,
+                sdf_shape=sdf_shape,
+                include_ground=include_ground,
+                ground_z=ground_z,
+            )
+            return occupancy.astype(np.uint8), "metadata_explicit_trunks"
+
+        forest_cfg = self._forest_cfg_from_metadata(raw_args, map_index=map_index)
+        if forest_cfg is None:
+            return None, None
+
+        occupancy = self._build_trunk_occupancy(
+            trunks=self._generate_trunk_primitives(forest_cfg),
+            min_bound=min_bound,
+            sdf_shape=sdf_shape,
+            include_ground=include_ground,
+            ground_z=ground_z,
+        )
+        return occupancy.astype(np.uint8), "metadata_random_forest_rebuild"
+
+    def _metadata_map_entry(self, metadata: dict[str, object], *, map_index: int) -> dict[str, object] | None:
+        raw_maps = metadata.get("maps")
+        if not isinstance(raw_maps, list):
+            return None
+        for entry in raw_maps:
+            if not isinstance(entry, dict):
+                continue
+            if int(entry.get("map_idx", -1)) == int(map_index):
+                return entry
+        if len(raw_maps) == 1 and map_index == 0 and isinstance(raw_maps[0], dict):
+            return raw_maps[0]
+        return None
+
+    def _explicit_trunks_from_metadata(self, map_entry: dict[str, object] | None) -> list[_TrunkPrimitive] | None:
+        if not isinstance(map_entry, dict):
+            return None
+        raw_trunks = map_entry.get("trunks")
+        if not isinstance(raw_trunks, list) or not raw_trunks:
+            return None
+
+        trunks: list[_TrunkPrimitive] = []
+        for raw_trunk in raw_trunks:
+            if not isinstance(raw_trunk, dict):
+                return None
+            required_keys = {"x", "y", "radius", "height"}
+            if not required_keys.issubset(raw_trunk):
+                return None
+            roll_deg = float(raw_trunk.get("roll_deg", 0.0))
+            pitch_deg = float(raw_trunk.get("pitch_deg", 0.0))
+            yaw_deg = float(raw_trunk.get("yaw_deg", 0.0))
+            trunks.append(
+                _TrunkPrimitive(
+                    x=float(raw_trunk["x"]),
+                    y=float(raw_trunk["y"]),
+                    z=float(raw_trunk.get("z", 0.0)),
+                    radius=float(raw_trunk["radius"]),
+                    height=float(raw_trunk["height"]),
+                    rotation=_rotation_matrix_from_euler_xyz_deg(roll_deg, pitch_deg, yaw_deg),
+                )
+            )
+        return trunks
+
+    def _resolve_metadata_map_index(self, *, file_path: Path, default_map_index: int) -> int:
+        stem = file_path.stem
+        if stem == "pointcloud":
+            return 0
+        match = re.search(r"(?:_|-)(\d+)$", stem)
+        if match is None:
+            return int(default_map_index)
+        return int(match.group(1))
+
+    def _forest_cfg_from_metadata(self, args: dict[str, object], *, map_index: int) -> RandomForestSceneCfg | None:
+        required_keys = (
+            "random_forest_seed",
+            "random_forest_size_x",
+            "random_forest_size_y",
+            "random_forest_tile_radius",
+            "random_forest_tree_dist",
+            "random_forest_clearance_radius",
+            "random_forest_scale_min",
+            "random_forest_scale_max",
+            "random_forest_tilt_deg_max",
+            "random_forest_trunk_radius_scale_min",
+            "random_forest_trunk_radius_scale_max",
+            "random_forest_canopy_scale_min",
+            "random_forest_canopy_scale_max",
+        )
+        if not all(key in args for key in required_keys):
+            return None
+        return RandomForestSceneCfg(
+            prim_path="/World/Obstacles/RandomForest",
+            seed=int(args["random_forest_seed"]) + int(map_index),
+            size_x=float(args["random_forest_size_x"]),
+            size_y=float(args["random_forest_size_y"]),
+            tile_radius=int(args["random_forest_tile_radius"]),
+            tree_dist=float(args["random_forest_tree_dist"]),
+            scale_min=float(args["random_forest_scale_min"]),
+            scale_max=float(args["random_forest_scale_max"]),
+            tilt_deg_max=float(args["random_forest_tilt_deg_max"]),
+            spawn_clearance_radius=float(args["random_forest_clearance_radius"]),
+            canopy_collision=bool(args.get("random_forest_canopy_collision", False)),
+            trunk_radius_scale_min=float(args["random_forest_trunk_radius_scale_min"]),
+            trunk_radius_scale_max=float(args["random_forest_trunk_radius_scale_max"]),
+            canopy_scale_min=float(args["random_forest_canopy_scale_min"]),
+            canopy_scale_max=float(args["random_forest_canopy_scale_max"]),
+        )
+
+    def _generate_trunk_primitives(self, forest_cfg: RandomForestSceneCfg) -> list[_TrunkPrimitive]:
+        primitives: list[_TrunkPrimitive] = []
+        for tile_x in range(-forest_cfg.tile_radius, forest_cfg.tile_radius + 1):
+            for tile_y in range(-forest_cfg.tile_radius, forest_cfg.tile_radius + 1):
+                tile_center_x = float(tile_x) * forest_cfg.size_x
+                tile_center_y = float(tile_y) * forest_cfg.size_y
+                rng = random.Random(_tile_seed(forest_cfg.seed, tile_x, tile_y))
+                positions = _generate_tile_positions(
+                    forest_cfg,
+                    rng,
+                    tile_center_x=tile_center_x,
+                    tile_center_y=tile_center_y,
+                )
+                for local_x, local_y in positions:
+                    scale_factor = rng.uniform(forest_cfg.scale_min, forest_cfg.scale_max)
+                    trunk_radius_scale = rng.uniform(
+                        forest_cfg.trunk_radius_scale_min,
+                        forest_cfg.trunk_radius_scale_max,
+                    )
+                    lower_canopy_scale = rng.uniform(forest_cfg.canopy_scale_min, forest_cfg.canopy_scale_max)
+                    _ = rng.uniform(forest_cfg.canopy_scale_min, min(forest_cfg.canopy_scale_max, lower_canopy_scale))
+                    roll_deg = rng.uniform(-forest_cfg.tilt_deg_max, forest_cfg.tilt_deg_max)
+                    pitch_deg = rng.uniform(-forest_cfg.tilt_deg_max, forest_cfg.tilt_deg_max)
+                    yaw_deg = rng.uniform(0.0, 360.0)
+                    primitives.append(
+                        _TrunkPrimitive(
+                            x=tile_center_x + float(local_x),
+                            y=tile_center_y + float(local_y),
+                            z=0.0,
+                            radius=float(forest_cfg.base_trunk_radius * scale_factor * trunk_radius_scale),
+                            height=float(forest_cfg.base_trunk_height * scale_factor),
+                            rotation=_rotation_matrix_from_euler_xyz_deg(roll_deg, pitch_deg, yaw_deg),
+                        )
+                    )
+        return primitives
+
+    def _build_trunk_occupancy(
+        self,
+        *,
+        trunks: list[_TrunkPrimitive],
+        min_bound: np.ndarray,
+        sdf_shape: np.ndarray,
+        include_ground: bool,
+        ground_z: float,
+    ) -> np.ndarray:
+        occupancy = np.zeros(tuple(int(v) for v in sdf_shape), dtype=bool)
+        if include_ground:
+            ground_index = int(np.floor((float(ground_z) - float(min_bound[2])) / float(self.voxel_size)))
+            ground_index = int(np.clip(ground_index, 0, int(sdf_shape[2]) - 1))
+            occupancy[:, :, ground_index] = True
+
+        radius_padding = 0.5 * self.voxel_size
+        height_padding = 0.5 * self.voxel_size
+        corner_padding = float(np.sqrt(3.0)) * 0.5 * self.voxel_size
+        for trunk in trunks:
+            inflated_radius = float(trunk.radius + radius_padding)
+            local_corners = np.asarray(
+                [
+                    [sx * (trunk.radius + corner_padding), sy * (trunk.radius + corner_padding), sz]
+                    for sx in (-1.0, 1.0)
+                    for sy in (-1.0, 1.0)
+                    for sz in (-height_padding - corner_padding, trunk.height + height_padding + corner_padding)
+                ],
+                dtype=np.float32,
+            )
+            rotated_corners = (trunk.rotation @ local_corners.T).T
+            rotated_corners[:, 0] += trunk.x
+            rotated_corners[:, 1] += trunk.y
+            rotated_corners[:, 2] += trunk.z
+            xyz_min = rotated_corners.min(axis=0)
+            xyz_max = rotated_corners.max(axis=0)
+            x_min = int(np.floor((xyz_min[0] - min_bound[0]) / self.voxel_size))
+            x_max = int(np.ceil((xyz_max[0] - min_bound[0]) / self.voxel_size)) + 1
+            y_min = int(np.floor((xyz_min[1] - min_bound[1]) / self.voxel_size))
+            y_max = int(np.ceil((xyz_max[1] - min_bound[1]) / self.voxel_size)) + 1
+            x_min = max(x_min, 0)
+            y_min = max(y_min, 0)
+            x_max = min(x_max, int(sdf_shape[0]))
+            y_max = min(y_max, int(sdf_shape[1]))
+            if x_max <= x_min or y_max <= y_min:
+                continue
+
+            z_min = int(np.floor((xyz_min[2] - min_bound[2]) / self.voxel_size))
+            z_max = int(np.ceil((xyz_max[2] - min_bound[2]) / self.voxel_size)) + 1
+            z_min = max(z_min, 0)
+            z_max = min(z_max, int(sdf_shape[2]))
+            if z_max <= z_min:
+                continue
+
+            xs = min_bound[0] + (np.arange(x_min, x_max, dtype=np.float32) + 0.5) * self.voxel_size
+            ys = min_bound[1] + (np.arange(y_min, y_max, dtype=np.float32) + 0.5) * self.voxel_size
+            zs = min_bound[2] + (np.arange(z_min, z_max, dtype=np.float32) + 0.5) * self.voxel_size
+            xx, yy, zz = np.meshgrid(xs, ys, zs, indexing="ij")
+
+            world_offsets = np.stack((xx - trunk.x, yy - trunk.y, zz - trunk.z), axis=-1)
+            local = world_offsets @ trunk.rotation
+            radial = np.sqrt(local[..., 0] ** 2 + local[..., 1] ** 2)
+            mask = (
+                (radial <= inflated_radius)
+                & (local[..., 2] >= -height_padding)
+                & (local[..., 2] <= trunk.height + height_padding)
+            )
+            if not np.any(mask):
+                continue
+            occupancy[x_min:x_max, y_min:y_max, z_min:z_max] |= mask
+        return occupancy
 
     def read_sorted_ply_files(self, path: Path) -> list[Path]:
         path = Path(path).expanduser().resolve()

@@ -12,7 +12,7 @@ class GuidanceLoss(nn.Module):
         super().__init__()
         self.cfg = ensure_config(config)
         self.goal_length = float(self.cfg["goal_length"])
-        self.vel_dir_weight = 0.0
+        self.vel_dir_weight = float(self.cfg.get("wgv", 0.0))
 
     def forward(self, df: th.Tensor, dp: th.Tensor, goal: th.Tensor) -> th.Tensor:
         """

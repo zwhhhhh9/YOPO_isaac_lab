@@ -16,7 +16,7 @@ from torch.utils.data import Dataset
 from yopo_drone.network.models.common import Config, make_config
 
 
-_GOAL_SAMPLING_MODES = {"gaussian_forward", "uniform_full_yaw", "uniform_box"}
+_GOAL_SAMPLING_MODES = {"gaussian_forward", "uniform_box"}
 
 
 @dataclass(frozen=True)
@@ -234,7 +234,7 @@ class YopoDataset(Dataset):
         return float(np.radians(pitch_deg))
 
     def _sample_goal_yaw_angle_rad(self) -> float:
-        if self.goal_sampling_mode in {"uniform_full_yaw", "uniform_box"}:
+        if self.goal_sampling_mode == "uniform_box":
             yaw_deg = np.random.uniform(self.goal_yaw_uniform_min_deg, self.goal_yaw_uniform_max_deg)
         else:
             yaw_deg = np.random.normal(0.0, self.goal_yaw_std)

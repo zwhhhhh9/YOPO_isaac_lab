@@ -6,6 +6,7 @@ logs/
 yopo_drone/logs/
 yopo_drone/network/data_train/
 yopo_drone/network/checkpoint/
+visualizations/png_outputs/
 *.log
 yopo_drone/data/*.csv
 

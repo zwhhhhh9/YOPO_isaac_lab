@@ -1,219 +1,156 @@
 # YOPO Isaac Lab
 
-Docker-based workspace for Isaac Lab, the YOPO drone scene editor, and the PX4-style hover / evaluation pipeline.
+This repository is mainly used for 4 tasks:
 
-## What This Repository Contains
-
-- Isaac Lab source checkout and Docker environment
-- YOPO drone environment editor and evaluation entry points
-- A URDF-driven drone model plus matching PX4 controller parameters
-- A ROS 2 workspace for custom messages such as `quadrotor_msgs/PositionCommand`
-
-## Key Entry Points
-
-| Path | Purpose |
-| --- | --- |
-| `scripts/init.sh` | Initialize or refresh the local Isaac Lab source tree |
-| `scripts/start.sh` | Main launcher for GUI, env editor, eval scripts, and ROS 2 nodes |
-| `yopo_drone/env/drone_env_editor.py` | Scene editor / stage construction entry |
-| `yopo_drone/tasks/editor_scene_eval_ego.py` | Preferred hover-eval entry with editor-style stage initialization |
-| `yopo_drone/utils/eval_ego.py` | Core PX4-style controller / telemetry / ROS bridge runner |
-| `yopo_drone/tasks/hover_initial_position.py` | Optional ROS 2 node that captures odometry and republishes a hover target |
-| `assets/robot./robot.urdf` | Drone URDF used by the runtime |
-| `assets/robot./px4_params.json` | PX4 controller parameters matched to the URDF model |
-
-## Repository Layout
-
-```text
-scripts/                     Launcher scripts
-env_tools/docker/isaaclab/   Docker setup and Isaac Lab checkout
-yopo_drone/                  Editor, eval, controller, ROS bridge helpers
-yopo_drone/logs/             Drone telemetry and CSV data collected from hover/eval runs
-ros2_ws/                     ROS 2 workspace for custom message packages
-assets/                      Robot and scene assets
-logs/                        Host-side runtime logs
-```
+1. Initialize the Isaac Lab environment
+2. Collect YOPO training data
+3. Train a YOPO model
+4. Run closed-loop inference and inspect the flight behavior
 
 ## Requirements
 
-- Linux with an NVIDIA GPU and working NVIDIA drivers
+- Linux
+- NVIDIA GPU with working drivers
 - Docker with the Docker Compose plugin
-- X11 desktop session for GUI runs (`DISPLAY` must be available)
-- Network access for the first `init.sh` or image rebuild when needed
+- Network access for the first initialization
+- A valid X11 `DISPLAY` on the host if you want to use the GUI
 
-## Setup
+## 1. Initialization
 
-### 1. Initialize Isaac Lab
+Initialize the Isaac Lab source tree first, then build the runtime image.
 
 ```bash
 cd YOPO_isaac_lab
 ./scripts/init.sh
-```
-
-### 2. Build or rebuild the Docker image
-
-Run this after Dockerfile changes, ROS 2 workspace changes, or whenever dependencies inside the image changed.
-
-```bash
 docker compose -f env_tools/docker/isaaclab/docker-compose.yml build yopo
 ```
 
-### 3. Smoke-test the base Isaac Lab GUI
+## 2. Data Collection
+
+Dataset collection entrypoint:
 
 ```bash
-./scripts/start.sh --gui
+./scripts/start.sh yopo_drone/network/collect_dataset/collect_yopo_dataset.py --headless
 ```
 
-## Common Workflows
-
-### Open the YOPO env editor
-
-GUI mode:
+A more typical collection example:
 
 ```bash
-./scripts/start.sh --env_editor
-```
-
-Headless build-and-exit smoke test:
-
-```bash
-./scripts/start.sh --env_editor --headless --close-after-build
-```
-
-Show env editor arguments:
-
-```bash
-./scripts/start.sh --env_editor --help
-```
-
-### Run the drone hover / evaluation scene
-
-This is the recommended entry point for drone hover checks. It first initializes the stage with the same helpers used by `drone_env_editor.py`, then launches `eval_ego.py`.
-
-GUI mode:
-
-```bash
-./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py --hover --num_envs 1
-```
-
-Headless mode:
-
-```bash
-./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py --hover --headless --num_envs 1
-```
-
-Headless mode with automatic telemetry export:
-
-```bash
-./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py --hover --headless --num_envs 1
-```
-
-Each hover / eval run automatically collects drone telemetry data into `yopo_drone/logs/`.
-The per-run CSV filename uses the form `hover_YYYYMMDD_HHMMSS.csv`, for example
-`hover_20260310_142530.csv`.
-
-### Run the `--target_goal` task
-
-`editor_scene_eval_ego.py` also supports an internal point-to-point task suffix: `--target_goal`.
-This task uses the same editor-style stage initialization as `--hover`, but the command flow is:
-
-1. Run a short closed-loop startup settle phase before telemetry and mission timing begin.
-2. Hover at the stabilized startup position for `--target_goal_hover_s` seconds.
-3. Fly toward `--target_goal_pos X Y Z` with the mission speed limited by `--target_goal_max_speed`.
-4. Hold position after reaching the target point.
-
-GUI mode with the default goal `(10, 0, 1)`:
-
-```bash
-./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py --target_goal --num_envs 1
-```
-
-Headless mode with the default goal:
-
-```bash
-./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py --target_goal --headless --num_envs 1
-```
-
-Headless mode with a custom world-frame goal, hover time, and speed limit:
-
-```bash
-./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py \
-  --target_goal \
-  --target_goal_pos 6 -4 1.5 \
-  --target_goal_hover_s 5.0 \
-  --target_goal_max_speed 1.0 \
-  --target_goal_startup_settle_steps 200 \
+./scripts/start.sh yopo_drone/network/collect_dataset/collect_yopo_dataset.py \
   --headless \
+  --env_num 10 \
+  --image_num 10000 \
+  --dataset_timestamp 20260324_my_dataset
+```
+
+Collected data will be written to:
+
+```text
+yopo_drone/network/data_train/<dataset_timestamp>/
+```
+
+The directory mainly contains:
+
+- `img/`: depth images
+- `pose.csv`: poses
+- `pointcloud.ply`: point cloud
+- `metadata.json`: collection parameters for this run
+
+Common arguments:
+
+- `--env_num`: number of random maps to generate
+- `--image_num`: number of images to collect per map
+- `--dataset_timestamp`: output directory name
+- `--safe_dist`: minimum clearance between the camera pose and obstacles
+
+## 3. Training
+
+Training entrypoint:
+
+```bash
+./scripts/start.sh yopo_drone/network/models/train/train_yopo.py \
+  --dataset-dir yopo_drone/network/data_train/<dataset_timestamp>
+```
+
+A more typical training example:
+
+```bash
+./scripts/start.sh yopo_drone/network/models/train/train_yopo.py \
+  --dataset-dir yopo_drone/network/data_train/20260324_my_dataset \
+  --epochs 50 \
+  --batch-size 16 \
+  --learning-rate 1.5e-4
+```
+
+Training outputs will be written to:
+
+```text
+yopo_drone/network/checkpoint/checkpoint_<timestamp>/
+```
+
+The checkpoint directory typically contains:
+
+- `*.pth`: final checkpoint
+- `*_best.pth`: best checkpoint on validation loss
+- `*_history.json`: training history
+- `*_summary.json`: training summary and inference config recovery data
+
+## 4. Inference
+
+### 4.1 View Flight Behavior in the GUI
+
+If you want to quickly inspect the flight behavior with the default configured model:
+
+```bash
+./scripts/start.sh yopo_drone/network/models/test/yopo_policy_gui.py --num_envs 1
+```
+
+### 4.2 Use Your Own Checkpoint and Dataset
+
+```bash
+./scripts/start.sh yopo_drone/network/models/test/yopo_policy_gui.py \
+  --checkpoint yopo_drone/network/checkpoint/checkpoint_xxx/epoch50_best.pth \
+  --dataset_dir yopo_drone/network/data_train/<dataset_timestamp> \
   --num_envs 1
 ```
 
-Useful `--target_goal` options:
-
-- `--target_goal_pos X Y Z`: world-frame target point. This can be any reachable target point in the map.
-- `--target_goal_hover_s SECONDS`: startup hover time before the vehicle starts translating.
-- `--target_goal_max_speed MPS`: mission cruise speed limit.
-- `--target_goal_startup_settle_steps STEPS`: startup hover stabilization steps run before logging and mission timing start.
-
-Each `--target_goal` run also writes telemetry CSV data into `yopo_drone/logs/`.
-The per-run CSV filename uses the form `target_goal_YYYYMMDD_HHMMSS.csv`, for example
-`target_goal_20260310_161851.csv`.
-
-### Run `eval_ego.py` directly
-
-Use this only when you specifically want the raw eval runner without the editor-style scene wrapper.
+### 4.3 Headless Inference
 
 ```bash
-./scripts/start.sh yopo_drone/utils/eval_ego.py --headless --num_envs 1
+./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py \
+  --yopo_policy \
+  --headless \
+  --num_envs 1 \
+  --yopo_policy_checkpoint yopo_drone/network/checkpoint/checkpoint_xxx/epoch50_best.pth \
+  --yopo_policy_dataset_dir yopo_drone/network/data_train/<dataset_timestamp>
 ```
 
-### Start the optional ROS 2 hover command node
+Inference telemetry CSV files will be written to:
 
-`eval_ego.py` can already hold position internally when no planner commands arrive. This node is only needed if you want an external ROS 2 `PositionCommand` publisher that captures the current odometry pose and keeps sending it.
+```text
+yopo_drone/logs/
+```
+
+## Recommended Workflow
 
 ```bash
-./scripts/start.sh --ros2-node yopo_drone/tasks/hover_initial_position.py
+./scripts/init.sh
+docker compose -f env_tools/docker/isaaclab/docker-compose.yml build yopo
+
+./scripts/start.sh yopo_drone/network/collect_dataset/collect_yopo_dataset.py \
+  --headless \
+  --env_num 10 \
+  --image_num 10000 \
+  --dataset_timestamp 20260324_my_dataset
+
+./scripts/start.sh yopo_drone/network/models/train/train_yopo.py \
+  --dataset-dir yopo_drone/network/data_train/20260324_my_dataset \
+  --epochs 50 \
+  --batch-size 16 \
+  --learning-rate 1.5e-4
+
+./scripts/start.sh yopo_drone/network/models/test/yopo_policy_gui.py \
+  --checkpoint yopo_drone/network/checkpoint/checkpoint_xxx/epoch50_best.pth \
+  --dataset_dir yopo_drone/network/data_train/20260324_my_dataset \
+  --num_envs 1
 ```
-
-Useful variants:
-
-```bash
-./scripts/start.sh --ros2-node yopo_drone/tasks/hover_initial_position.py --yaw-mode zero
-./scripts/start.sh --ros2-node yopo_drone/tasks/hover_initial_position.py --z-offset 0.2
-```
-
-## Control Model and Asset Mapping
-
-- `assets/robot./robot.urdf` is the drone model used by the editor and evaluation runtime.
-- `assets/robot./px4_params.json` stores the PX4-style controller tuning matched to that URDF.
-- `yopo_drone/utils/eval_ego.py` loads the URDF-derived rigid-body parameters, applies the PX4 tuning, and runs the controller.
-- `yopo_drone/utils/px4_controller.py` contains the PX4-style attitude / rate control implementation.
-
-If you change the drone geometry, mass properties, or rotor layout, update the URDF and then re-check the matching controller parameters in `assets/robot./px4_params.json`.
-
-## ROS 2 Notes
-
-- `scripts/start.sh --ros2-node ...` uses system `/usr/bin/python3` inside the container with ROS 2 sourced.
-- When direct `rclpy` import is unavailable inside Isaac Python, `eval_ego.py` automatically starts a ROS 2 UDP sidecar bridge.
-- The custom message package source of truth is `ros2_ws/src/quadrotor_msgs`.
-
-## Useful Commands
-
-Show launcher help:
-
-```bash
-./scripts/start.sh --help
-```
-
-Stop all running YOPO Isaac Lab containers:
-
-```bash
-./scripts/start.sh --stop-all
-```
-
-## Runtime Notes
-
-- `scripts/start.sh` creates a fresh disposable Docker Compose project for each run.
-- On exit, that Compose project is cleaned up automatically.
-- The launcher auto-creates shared Docker volumes used by Isaac Sim caches and logs.
-- `ros2_ws/build`, `ros2_ws/install`, and `ros2_ws/log` are built on demand and ownership is normalized back to the host user.
-- If a GUI window does not appear, first check `DISPLAY`, X11 permissions, and host-side `xhost` access.

@@ -104,14 +104,14 @@ class YopoTrainer:
         compact_backbone: bool = False,
         seed: int = 0,
         device: str | None = None,
-        goal_sampling_mode: str = "uniform_full_yaw",
+        goal_sampling_mode: str = "gaussian_forward",
         goal_yaw_uniform_min_deg: float = -180.0,
         goal_yaw_uniform_max_deg: float = 180.0,
         goal_pitch_uniform_min_deg: float = -30.0,
         goal_pitch_uniform_max_deg: float = 30.0,
-        safety_weight: float = 1.5,
-        safety_distance_margin: float = 1.6,
-        safety_decay_radius: float = 0.8,
+        safety_weight: float = 1.0,
+        safety_distance_margin: float = 1.2,
+        safety_decay_radius: float = 0.6,
     ) -> None:
         self.dataset_dir = Path(dataset_dir).expanduser().resolve()
         self.checkpoint_dir = Path(checkpoint_dir).expanduser().resolve()

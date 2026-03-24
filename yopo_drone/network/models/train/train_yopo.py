@@ -16,9 +16,7 @@ from yopo_drone.network.models.train.yopo_trainer import YopoTrainer
 
 def _default_checkpoint_name(*, epochs: int, goal_sampling_mode: str) -> str:
     stem = f"epoch{int(epochs)}"
-    if goal_sampling_mode == "uniform_full_yaw":
-        stem += "_full_yaw"
-    elif goal_sampling_mode == "uniform_box":
+    if goal_sampling_mode == "uniform_box":
         stem += "_uniform_box"
     else:
         stem += "_gaussian_forward"
@@ -56,9 +54,9 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--goal-sampling-mode",
         type=str,
-        default="uniform_full_yaw",
-        choices=("gaussian_forward", "uniform_full_yaw", "uniform_box"),
-        help="Training goal sampling mode. Default uses full-yaw sampling to cover arbitrary mission-goal directions.",
+        default="gaussian_forward",
+        choices=("gaussian_forward", "uniform_box"),
+        help="Training goal sampling mode. Default follows the original YOPO forward-biased Gaussian sampling.",
     )
     parser.add_argument(
         "--goal-yaw-uniform-range",
@@ -79,19 +77,19 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--safety-weight",
         type=float,
-        default=1.5,
+        default=1.0,
         help="Safety-loss weight wc. Larger values bias the model toward safer trajectories.",
     )
     parser.add_argument(
         "--safety-d0",
         type=float,
-        default=1.6,
+        default=1.2,
         help="Safety-loss clearance target d0 in exp(-(d - d0) / r). Larger values prefer more obstacle clearance.",
     )
     parser.add_argument(
         "--safety-r",
         type=float,
-        default=0.8,
+        default=0.6,
         help="Safety-loss decay radius r in exp(-(d - d0) / r). Larger values keep obstacle penalties active farther away.",
     )
     return parser

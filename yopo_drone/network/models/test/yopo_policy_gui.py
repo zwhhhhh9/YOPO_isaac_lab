@@ -14,8 +14,7 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[4]
 
 
-# Last verified checkpoint that reaches the sampled mission goal with the
-# current docking / hover-hold runtime and full-yaw training distribution.
+# Default checkpoint for the built-in GUI validation entrypoint.
 DEFAULT_CHECKPOINT = (
     _repo_root()
     / "yopo_drone"
@@ -90,7 +89,7 @@ def _parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
         "--velocity",
         type=float,
         default=2.0,
-        help="Original-YOPO testing velocity passed to the runtime config. Default keeps evaluation capped at 2.0 m/s.",
+        help="Original-YOPO testing velocity passed to the runtime config. Default now limits test-time planning to a 2.0 m/s speed scale.",
     )
     parser.add_argument(
         "--compact_backbone",

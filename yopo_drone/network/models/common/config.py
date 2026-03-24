@@ -18,9 +18,10 @@ class YopoModelConfig:
     vel_max_train: float = 6.0
     acc_max_train: float = 6.0
     wg: float = 0.15
+    wgv: float = 0.0
     ws: float = 10.0
     wa: float = 1.0
-    wc: float = 1.5
+    wc: float = 1.0
     dataset_path: str = "yopo_drone/network/data_train"
     image_height: int = 96
     image_width: int = 160
@@ -32,8 +33,8 @@ class YopoModelConfig:
     vertical_anchor_fov: float = 30.0
     radio_range: float = 5.0
     radio_num: int = 1
-    d0: float = 1.6
-    r: float = 0.8
+    d0: float = 1.2
+    r: float = 0.6
     vx_mean_unit: float = 0.4
     vy_mean_unit: float = 0.0
     vz_mean_unit: float = 0.0
@@ -48,7 +49,7 @@ class YopoModelConfig:
     az_std_unit: float = 0.3
     goal_pitch_std: float = 10.0
     goal_yaw_std: float = 20.0
-    goal_sampling_mode: str = "uniform_full_yaw"
+    goal_sampling_mode: str = "gaussian_forward"
     goal_yaw_uniform_min_deg: float = -180.0
     goal_yaw_uniform_max_deg: float = 180.0
     goal_pitch_uniform_min_deg: float = -30.0

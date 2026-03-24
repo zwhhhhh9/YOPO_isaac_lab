@@ -242,6 +242,7 @@ class QuinticTrajectory:
         initial_yaw: float = 0.0,
         fixed_yaw: float = 0.0,
         max_yaw_rate: float = 0.5,
+        yaw_goal_pos: np.ndarray | None = None,
     ):
         self.start_pos = np.asarray(start_pos, dtype=np.float64).reshape(3)
         self.start_vel = np.asarray(start_vel, dtype=np.float64).reshape(3)
@@ -254,6 +255,9 @@ class QuinticTrajectory:
         self.initial_yaw = float(initial_yaw)
         self.fixed_yaw = float(fixed_yaw)
         self.max_yaw_rate = float(max_yaw_rate)
+        if yaw_goal_pos is None:
+            yaw_goal_pos = self.goal_pos
+        self.yaw_goal_pos = np.asarray(yaw_goal_pos, dtype=np.float64).reshape(3)
 
         self._solvers = [
             Poly5Solver(
@@ -289,7 +293,7 @@ class QuinticTrajectory:
         if self.yaw_mode == "adaptive":
             return calculate_yaw(
                 vel_dir=velocity,
-                goal_dir=self.goal_pos - position,
+                goal_dir=self.yaw_goal_pos - position,
                 last_yaw=last_yaw,
                 dt=dt,
                 max_yaw_rate=self.max_yaw_rate,

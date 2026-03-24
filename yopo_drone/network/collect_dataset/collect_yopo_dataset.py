@@ -295,7 +295,7 @@ def _build_argparser() -> argparse.ArgumentParser:
         "--tiled-cam-height",
         dest="tiled_cam_height",
         type=int,
-        default=90,
+        default=96,
         help="Dataset camera height.",
     )
     parser.add_argument(
@@ -584,6 +584,24 @@ def _build_map_pointcloud(layout: list[TreeInstance], samples_per_tree: int) -> 
         return np.empty((0, 3), dtype=np.float32)
     point_sets = [_sample_tree_surface_points(tree, samples_per_tree=samples_per_tree) for tree in layout]
     return np.vstack(point_sets).astype(np.float32)
+
+
+def _serialize_trunk_metadata(layout: list[TreeInstance]) -> list[dict[str, float]]:
+    trunks: list[dict[str, float]] = []
+    for tree in layout:
+        trunks.append(
+            {
+                "x": float(tree.center_x),
+                "y": float(tree.center_y),
+                "z": 0.0,
+                "roll_deg": float(tree.roll_deg),
+                "pitch_deg": float(tree.pitch_deg),
+                "yaw_deg": float(tree.yaw_deg),
+                "radius": float(tree.trunk_radius),
+                "height": float(tree.trunk_height),
+            }
+        )
+    return trunks
 
 
 def _build_ground_pointcloud(
@@ -961,6 +979,7 @@ def main() -> int:
                     "map_idx": map_idx,
                     "forest_summary": _serialize_jsonable(forest_summary),
                     "tree_count": len(tree_layout),
+                    "trunks": _serialize_trunk_metadata(tree_layout),
                     "tree_point_count": int(tree_points.shape[0]),
                     "ground_point_count": int(ground_points.shape[0]),
                     "point_count": int(map_points.shape[0]),
