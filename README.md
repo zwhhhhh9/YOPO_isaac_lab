@@ -17,12 +17,17 @@ This repository is mainly used for 4 tasks:
 
 ## 1. Initialization
 
-Initialize the Isaac Lab source tree first, then build the runtime image.
+`./scripts/init.sh` now initializes the Isaac Lab source tree and builds the runtime image by default.
 
 ```bash
 cd YOPO_isaac_lab
 ./scripts/init.sh
-docker compose -f env_tools/docker/isaaclab/docker-compose.yml build yopo
+```
+
+If you only want to initialize the source tree and skip the Docker build:
+
+```bash
+./scripts/init.sh --no-build
 ```
 
 ## 2. Data Collection
@@ -117,12 +122,11 @@ If you want to quickly inspect the flight behavior with the default configured m
 ### 4.3 Headless Inference
 
 ```bash
-./scripts/start.sh yopo_drone/tasks/editor_scene_eval_ego.py \
-  --yopo_policy \
+./scripts/start.sh yopo_drone/network/models/test/yopo_policy_gui.py \
+  --checkpoint yopo_drone/network/checkpoint/checkpoint_xxx/epoch50_best.pth \
+  --dataset_dir yopo_drone/network/data_train/<dataset_timestamp> \
   --headless \
-  --num_envs 1 \
-  --yopo_policy_checkpoint yopo_drone/network/checkpoint/checkpoint_xxx/epoch50_best.pth \
-  --yopo_policy_dataset_dir yopo_drone/network/data_train/<dataset_timestamp>
+  --num_envs 1
 ```
 
 Inference telemetry CSV files will be written to:
@@ -135,7 +139,6 @@ yopo_drone/logs/
 
 ```bash
 ./scripts/init.sh
-docker compose -f env_tools/docker/isaaclab/docker-compose.yml build yopo
 
 ./scripts/start.sh yopo_drone/network/collect_dataset/collect_yopo_dataset.py \
   --headless \

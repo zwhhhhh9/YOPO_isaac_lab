@@ -42,7 +42,7 @@ x-default-isaac-lab-volumes: &default-isaac-lab-volumes
     source: ${PROJECT_ROOT}/assets
     target: ${DOCKER_ISAACLAB_PATH}/assets
   - type: bind
-    source: ${PROJECT_ROOT}/logs
+    source: ${PROJECT_ROOT}/yopo_drone/logs
     target: ${DOCKER_ISAACLAB_PATH}/logs
   - type: bind
     source: ${PROJECT_ROOT}/ros2_ws

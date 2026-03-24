@@ -5,12 +5,35 @@ SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 BASE_DIR="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="$BASE_DIR/env_tools/docker/isaaclab/.env"
 ISAACLAB_DIR="$BASE_DIR/env_tools/docker/isaaclab/IsaacLab"
+DOCKER_COMPOSE_FILE="$BASE_DIR/env_tools/docker/isaaclab/docker-compose.yml"
 DEFAULT_ISAACLAB_REPO="https://github.com/isaac-sim/IsaacLab.git"
 DEFAULT_ISAACLAB_VERSION="v2.3.2"
+BUILD_IMAGE=1
 
 require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
         echo "Error: required command not found: $1"
+        exit 1
+    fi
+}
+
+show_help() {
+    echo "Usage: ./scripts/init.sh [options]"
+    echo ""
+    echo "Options:"
+    echo "  --build          Build the yopo Docker image after initialization (default)"
+    echo "  --no-build       Skip Docker image build and only initialize Isaac Lab source"
+    echo "  -h, --help       Show this help message and exit"
+}
+
+ensure_docker_ready() {
+    require_command docker
+    if ! docker compose version >/dev/null 2>&1; then
+        echo "Error: docker compose plugin is not available."
+        exit 1
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        echo "Error: cannot access Docker daemon. Check docker service and user permissions."
         exit 1
     fi
 }
@@ -21,6 +44,28 @@ has_isaaclab_submodule_config() {
     git -C "$BASE_DIR" config -f .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null \
         | awk '{print $2}' | grep -Fxq "$rel_path"
 }
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --build)
+            BUILD_IMAGE=1
+            ;;
+        --no-build)
+            BUILD_IMAGE=0
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        *)
+            echo "Error: unknown option: $1"
+            echo ""
+            show_help
+            exit 1
+            ;;
+    esac
+    shift
+done
 
 if [ -f "$ENV_FILE" ]; then
     set -a
@@ -71,6 +116,12 @@ if [ ! -x "$ISAACLAB_DIR/isaaclab.sh" ]; then
     exit 1
 fi
 
-mkdir -p "$BASE_DIR/logs"
+mkdir -p "$BASE_DIR/yopo_drone/logs"
+
+if [ "$BUILD_IMAGE" -eq 1 ]; then
+    ensure_docker_ready
+    echo "Building Docker image: yopo"
+    docker compose -f "$DOCKER_COMPOSE_FILE" build yopo
+fi
 
 echo "Initialized YOPO_isaac_lab scaffold and IsaacLab source."

@@ -27,7 +27,7 @@ check_environment() {
 setup_directories() {
     echo "Syncing project directories..."
     rsync -av --delete "${BASE_DIR}/yopo_drone/" "${ISAACLAB_PATH}/yopo_drone/"
-    mkdir -p "${ISAACLAB_PATH}/logs"
+    mkdir -p "${ISAACLAB_PATH}/yopo_drone/logs"
 }
 
 setup_environment() {
@@ -39,7 +39,7 @@ setup_environment() {
     [ -n "$python_path" ] && python_path="${python_path}:"
     export PYTHONPATH="${python_path}${ISAACLAB_PATH}"
 
-    mkdir -p "${BASE_DIR}/logs"
+    mkdir -p "${BASE_DIR}/yopo_drone/logs"
 }
 
 main() {

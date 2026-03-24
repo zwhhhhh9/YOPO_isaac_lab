@@ -349,7 +349,7 @@ if [ -n "${DISPLAY:-}" ] && command -v xhost >/dev/null 2>&1; then
     xhost +local:root >/dev/null 2>&1 || true
     xhost +SI:localuser:root >/dev/null 2>&1 || true
 fi
-mkdir -p "$BASE_DIR/logs"
+mkdir -p "$BASE_DIR/yopo_drone/logs"
 
 echo "Starting new container with project name: $PROJECT_NAME"
 COMPOSE_STARTED=1
